@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+storage/
+secrets/
+requests/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log

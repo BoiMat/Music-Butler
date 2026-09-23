@@ -1,0 +1,4 @@
+# Direct dependencies. requirements.lock includes pinned, hashed transitive dependencies.
+yt-dlp==2026.8.19
+mutagen==1.48.1
+spotdl==4.5.2

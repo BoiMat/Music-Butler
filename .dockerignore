@@ -1,0 +1,7 @@
+*
+!docker/
+!docker/Dockerfile
+!requirements.lock
+!scripts/
+!scripts/download_music.sh
+!scripts/music_butler.py

@@ -1,0 +1,108 @@
+name: music-butler
+
+x-hardening: &hardening
+  user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-tooling: &tooling
+  <<: *hardening
+  image: music-butler-tools:local
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  init: true
+  restart: "no"
+  networks: [music]
+  mem_limit: 2g
+  cpus: 2
+  tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
+  volumes:
+    - type: bind
+      source: ${LIBRARY_PATH:-./storage/library}
+      target: /library
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${SECRETS_PATH:-./secrets}
+      target: /run/music-secrets
+      read_only: true
+      bind:
+        create_host_path: false
+  environment:
+    LIBRARY_ROOT: /library
+    DOWNLOAD_ALLOWED_HOSTS: ${DOWNLOAD_ALLOWED_HOSTS:-archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,youtu.be}
+    ENABLE_SPOTDL: ${ENABLE_SPOTDL:-false}
+    SPOTDL_CREDENTIALS_FILE: /run/music-secrets/spotify.json
+    LRCLIB_USER_AGENT: ${LRCLIB_USER_AGENT:-}
+    NAVIDROME_URL: http://navidrome:4533
+    NAVIDROME_USER: ${NAVIDROME_USER:-}
+    NAVIDROME_PASSWORD_FILE: ${NAVIDROME_PASSWORD_FILE:-/run/music-secrets/navidrome_password}
+
+services:
+  navidrome:
+    <<: *hardening
+    image: ${NAVIDROME_IMAGE:-deluan/navidrome:0.64.1}
+    restart: unless-stopped
+    networks: [music]
+    mem_limit: 1g
+    cpus: 2
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${NAVIDROME_PORT:-4533}:4533"
+    tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
+    environment:
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      ND_SCANNER_ENABLED: "true"
+      ND_SCANNER_SCHEDULE: ${SCAN_SCHEDULE:-@every 1m}
+      ND_SCANNER_WATCHERWAIT: 5s
+      ND_LYRICSPRIORITY: .lrc,embedded
+      ND_ENABLESHARING: "false"
+      ND_ENABLEINSIGHTSCOLLECTOR: "false"
+      ND_DEEZER_ENABLED: "false"
+      ND_LOGLEVEL: info
+    volumes:
+      - type: bind
+        source: ${NAVIDROME_DATA_PATH:-./storage/navidrome}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LIBRARY_PATH:-./storage/library}/music
+        target: /music
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # Root UI checks HTTP availability, not credentials/database scan completion.
+      test: [CMD, curl, --fail, --silent, --max-time, "5", --output, /dev/null, "http://127.0.0.1:4533/"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
+
+  downloader:
+    <<: *tooling
+    profiles: [tools]
+    # One-shot: docker compose run --rm -T downloader < requests/approved.json
+    stdin_open: true
+
+  hermes-exec:
+    <<: *tooling
+    profiles: [hermes]
+    # Optional terminal execution sandbox for an EXISTING Hermes, NOT another agent.
+    entrypoint: [sleep, infinity]
+    restart: unless-stopped
+    # No model keys, chat gateway, host home or Docker socket mounted.
+    # Exec-only sandbox has no network listener to health-check.
+
+networks:
+  music:
+    driver: bridge
