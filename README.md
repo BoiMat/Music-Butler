@@ -95,6 +95,34 @@ request is **not** a guarantee that the library is already indexed.
         └── music/Artist--Album--ID/ # audio + same-name LRC + provenance
 ```
 
+## Backups
+
+`scripts/backup.sh` makes an encrypted [restic](https://restic.net) snapshot of
+the library (audio, lyrics, provenance, receipts), a consistent Navidrome
+database copy (`navidrome backup create`), `.env`, `secrets/` and `requests/`.
+It keeps 7 daily, 4 weekly and 12 monthly snapshots and verifies a sample of
+the repository after each run. If `BACKUP_REPOSITORY` points at an unmounted
+drive, the run is skipped.
+
+```sh
+brew install restic
+security add-generic-password -a music-butler -s music-butler-restic \
+  -l 'Music Butler restic backup' -T /usr/bin/security -w "$(openssl rand -base64 32)"
+# Set BACKUP_REPOSITORY in .env, then:
+./scripts/backup.sh init
+./scripts/backup.sh            # back up now
+./scripts/backup.sh restore-test
+```
+
+**Copy the password into a password manager**
+(`security find-generic-password -a music-butler -s music-butler-restic -w`).
+Without it the backup cannot be decrypted, so losing the Mac would also lose the backup.
+On Linux, set `RESTIC_PASSWORD_FILE` instead of using the Keychain.
+
+To restore: `restic restore latest --target /tmp/restore`, copy the library and
+`.env`/`secrets` back, then with Navidrome stopped run
+`docker compose run --rm navidrome /app/navidrome backup restore --backup-file /data/backup/<file>.db`.
+
 ## Operate and validate
 
 ```sh
