@@ -29,6 +29,7 @@ VERSION = "0.1.0"
 MAX_REQUEST = 262144
 MAX_RESPONSE = 1048576
 DEFAULT_HOSTS = "archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,youtu.be"
+YOUTUBE_HOSTS = {"www.youtube.com", "youtube.com", "youtu.be"}
 
 
 class Failure(Exception):
@@ -103,7 +104,7 @@ def validate(data, resolve=False):
             s = url(track["spotify_url"], {"open.spotify.com"}, resolve)
             if not re.fullmatch(r"/track/[A-Za-z0-9]{22}", urllib.parse.urlsplit(s).path):
                 raise Failure("spotify_track_url_required")
-            if urllib.parse.urlsplit(t["url"]).hostname not in {"www.youtube.com", "youtube.com", "youtu.be"}:
+            if urllib.parse.urlsplit(t["url"]).hostname not in YOUTUBE_HOSTS:
                 raise Failure("spotdl_requires_explicit_youtube_pair")
             t["spotify_url"] = s
         if "artwork_url" in track:
@@ -210,11 +211,16 @@ def acquire(track, request, work, env):
         else:
             emit("warning", reason="spotdl_not_installed_using_yt_dlp")
     if not source.exists():
+        # Archives such as Wikimedia reject bots posing as browsers; YouTube needs yt-dlp's default.
+        agent = []
+        if urllib.parse.urlsplit(track["url"]).hostname not in YOUTUBE_HOSTS:
+            agent = ["--user-agent", text(os.environ.get("DOWNLOAD_USER_AGENT") or f"music-butler/{VERSION}",
+                                          "download_user_agent")]
         run(["yt-dlp", "--ignore-config", "--no-plugin-dirs", "--no-playlist",
              "--no-progress", "--no-warnings", "--no-cache-dir", "--no-geo-bypass",
              "--js-runtimes", "node", "--socket-timeout", "30", "--retries", "2", "--fragment-retries", "2",
              "--max-filesize", "500M", "--match-filter", "!is_live & duration <? 3601",
-             "-f", "bestaudio/best", "-x", "--audio-format", "flac",
+             "-f", "bestaudio/best", "-x", "--audio-format", "flac", *agent,
              "-o", str(work / "source.%(ext)s"), "--", track["url"]], work, env)
     if not source.is_file() or source.is_symlink():
         raise Failure("no_audio_output", 69)

@@ -39,6 +39,7 @@ x-tooling: &tooling
   environment:
     LIBRARY_ROOT: /library
     DOWNLOAD_ALLOWED_HOSTS: ${DOWNLOAD_ALLOWED_HOSTS:-archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,youtu.be}
+    DOWNLOAD_USER_AGENT: ${DOWNLOAD_USER_AGENT:-}
     ENABLE_SPOTDL: ${ENABLE_SPOTDL:-false}
     SPOTDL_CREDENTIALS_FILE: /run/music-secrets/spotify.json
     LRCLIB_USER_AGENT: ${LRCLIB_USER_AGENT:-}

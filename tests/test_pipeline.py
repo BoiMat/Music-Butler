@@ -161,6 +161,7 @@ class NetworkMocks(unittest.TestCase):
             self.assertEqual(argv[0], "yt-dlp")
             self.assertEqual(argv[-2:], ["--", r["tracks"][0]["url"]])
             self.assertIn("--ignore-config", argv)
+            self.assertEqual(argv[argv.index("--user-agent") + 1], f"music-butler/{b.VERSION}")
             (work / "source.flac").write_bytes(b"fixture")
         with patch.object(b, "run", side_effect=fake_run):
             _, provider = b.acquire(r["tracks"][0], r, self.root, {})
@@ -189,6 +190,7 @@ class NetworkMocks(unittest.TestCase):
                 self.assertEqual(args.lyrics_providers, [])
                 raise b.Failure("simulated_spotdl_unavailable", 69)
             yt_dlp.parse_options(argv[1:])
+            self.assertNotIn("--user-agent", argv)  # YouTube keeps yt-dlp's default.
             self.assertEqual(argv[-1], r["tracks"][0]["url"])
             (cwd / "source.flac").write_bytes(b"test fixture")
         with patch.dict(os.environ, {"ENABLE_SPOTDL": "true", "SPOTDL_CREDENTIALS_FILE": str(secret)}), patch.object(b, "run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
