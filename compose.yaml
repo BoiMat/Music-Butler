@@ -26,7 +26,7 @@ x-tooling: &tooling
   tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
   volumes:
     - type: bind
-      source: ${LIBRARY_PATH:-./storage/library}
+      source: ${MUSIC_LIBRARY_PATH:-./storage/library}
       target: /library
       bind:
         create_host_path: false
@@ -75,7 +75,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${LIBRARY_PATH:-./storage/library}/music
+        source: ${MUSIC_LIBRARY_PATH:-./storage/library}/music
         target: /music
         read_only: true
         bind:

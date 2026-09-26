@@ -35,7 +35,7 @@ scripts/download_music.sh → music_butler.py
         └─ private sibling staging → fsync → atomic whole-release directory rename
                                  │
                                  ▼
-LIBRARY_PATH/music/Artist--Album--UUID/    → Navidrome /music (read-only)
+MUSIC_LIBRARY_PATH/music/Artist--Album--UUID/    → Navidrome /music (read-only)
      audio + .lrc + provenance.json          /data (writable SQLite + cache)
                                  │             │
                                  └─ scan request / watcher / scheduled scan
@@ -100,8 +100,8 @@ and never overwrites an existing `.env`. Review custom paths before running.
 | Host setting / default | Container | Access and purpose |
 |---|---|---|
 | `NAVIDROME_DATA_PATH=./storage/navidrome` | Navidrome `/data` | read/write SQLite, settings, artwork/transcoding cache |
-| `LIBRARY_PATH=./storage/library` | tooling `/library` | read/write staging, music and request receipts |
-| `LIBRARY_PATH/music` | Navidrome `/music` | **read-only**, only published releases |
+| `MUSIC_LIBRARY_PATH=./storage/library` | tooling `/library` | read/write staging, music and request receipts |
+| `MUSIC_LIBRARY_PATH/music` | Navidrome `/music` | **read-only**, only published releases |
 | `SECRETS_PATH=./secrets` | tooling `/run/music-secrets` | read-only secret files; directory may be empty |
 | tmpfs | each `/tmp` | size-limited, noexec/nosuid ephemeral scratch |
 

@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class ComposeConfig(unittest.TestCase):
     def test_profiles_mounts_security_and_example(self):
         env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
+        # macOS CLT python3 exports these compiler paths; they must never become bind mounts.
+        env.update(LIBRARY_PATH="/usr/local/lib", CPATH="/usr/local/include")
         cmd = ["docker", "compose", "--env-file", ".env.example", "--profile", "tools", "--profile", "hermes", "config", "--format", "json"]
         result = subprocess.run(cmd, cwd=ROOT, env=env, text=True, capture_output=True, check=True)
         services = json.loads(result.stdout)["services"]
@@ -28,6 +30,8 @@ class ComposeConfig(unittest.TestCase):
             self.assertIn("no-new-privileges:true", svc["security_opt"])
             self.assertFalse(svc.get("privileged", False))
             self.assertFalse(any("docker.sock" in v["source"] for v in svc["volumes"]))
+            for v in svc["volumes"]:
+                self.assertTrue(Path(v["source"]).is_relative_to(ROOT), v["source"])
         mounts = {v["target"]: v for v in nav["volumes"]}
         self.assertTrue(mounts["/music"]["read_only"])
         self.assertNotIn("/library", mounts)
