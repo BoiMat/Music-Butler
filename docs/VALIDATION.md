@@ -108,11 +108,14 @@ low-space test; the real importer retains its 2 GiB minimum-free-space check.
   File permissions and the independently permitted validations/build/smoke calls
   above provided the actual evidence.
 
-## Post-merge findings (2026-09-26)
+## Live deployment (2026-09-26 – 2026-09-27)
 
-First real `./scripts/setup.sh --start` in the main checkout exposed two bugs
-that the offline/`config`-only checks above missed; both fixed with regression
-assertions in `tests/test_config.py`:
+The stack was then deployed for real on a macOS host (Docker Desktop) and used
+from an Android phone.
+
+### Bugs found and fixed
+
+Each has a regression assertion in `tests/test_config.py` or `tests/test_pipeline.py`:
 
 - `LIBRARY_PATH` collided with the compiler variable that macOS CLT `python3`
   exports (`/usr/local/lib`); Compose prefers the process environment over
@@ -120,22 +123,24 @@ assertions in `tests/test_config.py`:
   `MUSIC_LIBRARY_PATH`.
 - Unquoted `tmpfs: [/tmp:rw,noexec,...]` is a YAML flow list, so the commas
   produced five mounts and `docker compose up` failed with
-  `invalid mount path: 'mode=1777'`. Now quoted.
-
+  `invalid mount path: 'mode=1777'`. Now quoted. `compose config` alone did not
+  catch this.
 - Wikimedia's robot policy returned 403 to yt-dlp's default Chrome UA and to
   `Python-urllib` artwork fetches. Non-YouTube downloads and artwork now send
   `DOWNLOAD_USER_AGENT`, which must include contact info for Wikimedia.
 
-First live imports (both public domain): Scott Joplin *Maple Leaf Rag* (1916
-piano roll, upload.wikimedia.org, with Commons artwork) and Enrico Caruso *Over
-There* (1918, archive.org FLAC). Both completed, the authenticated scan returned
-`requested`, and Navidrome `search3` listed both songs. LRCLIB returned no synced
-lyrics for either (instrumental / not in database); the synced path was checked
-separately with a live lookup for a well-known song.
+### What was verified live
 
-After the fixes: 21 host tests pass (ShellCheck included), `docker compose up -d`
-brings Navidrome to `healthy` on `127.0.0.1:4533`, and the built downloader
-container returns `valid` for `config/request.example.json` under `--validate`.
+| Area | Result |
+|---|---|
+| Setup and server | `./scripts/setup.sh`, `docker compose up -d`; Navidrome `healthy` on `127.0.0.1:4533` |
+| Imports | Public-domain recordings from upload.wikimedia.org (Joplin *Maple Leaf Rag*, 1916 piano roll, with Commons artwork embedded) and archive.org (Caruso *Over There*, 1918, FLAC source) completed with `complete` events |
+| Scan and indexing | Authenticated `startScan` returned `requested`; Navidrome `search3` listed the imported songs |
+| Lyrics | Live LRCLIB lookup returned synced lyrics for a well-known song; the imported recordings honestly reported `unavailable` (instrumental / not in LRCLIB) |
+| Phone | Tempo on Android connected through `tailscale serve` (tailnet-only HTTPS, Navidrome still on loopback) with a non-admin account; imports showed up and played (user-confirmed) |
+| Agent skill | Hermes, via its chat gateway and `skills/music-butler`, found a public-domain *The Entertainer* on Commons, wrote and validated the request, ran `butler.sh import` in the background and reported the result |
+| Backups | `scripts/backup.sh` against a temporary restic repository: backup, prune, `restic check`, and `restore-test` with all audio hashes identical; Navidrome `backup create` copy passed SQLite `integrity_check` |
+| Tests | 21 host tests pass, ShellCheck clean on all scripts |
 
 ## Reproduce
 
@@ -162,21 +167,16 @@ Navidrome image, runs disposable containers, mounts this source read-only and
 cleans up temporary server storage. It does not start the default Compose
 project, publish ports, download music or contact chat/model services.
 
-## Not tested / deployment acceptance still required
+## Not tested / still required
 
-- A real authorized remote download, live Spotify API credentials or live LRCLIB
-  lookup: no approved recording/credentials supplied; mocks used, not fabrication.
-- Authenticated Navidrome scan/indexing/end-to-end playback: disposable server
-  had no user account; production credentials were not available or used.
-- Android/Tempo lyrics, offline cache behavior or word-level karaoke: no device.
-- Hermes gateway/Telegram/chat tool adapter or full separate Hermes agent:
-  existing instance must be configured by its operator; optional sandbox only.
-- TLS/VPN, hostile-network egress enforcement, hardware crash/power-loss recovery,
-  backup restoration, NFS/SMB or multi-host writers, and vulnerability scanning.
-- `docker compose up -d` against a permanent deployment: intentionally not run;
-  equivalent server startup settings were smoke-tested in an isolated container.
-
-Before real use: review rights evidence, configure real LRCLIB identification if
-wanted, create the first admin locally, set Tempo's non-admin account, verify
-filesystem permissions/quota, test an approved recording, verify indexing and
-lyrics on the actual phone, and perform an encrypted backup/restore drill.
+- spotDL with live Spotify API credentials, and YouTube sources.
+- An album (multi-track) import against a live source; albums are covered only by
+  the offline tests.
+- Synced lyrics shown in Tempo for an imported song (none of the imported
+  recordings had LRCLIB lyrics), Tempo offline cache, word-level karaoke.
+- A backup to a real external drive, and a full disaster restore
+  (`navidrome backup restore` plus library) onto a fresh host.
+- Public exposure through a TLS reverse proxy or Tailscale Funnel.
+- Hostile-network egress enforcement, crash/power-loss recovery, NFS/SMB or
+  multi-host writers, and vulnerability scanning.
+- Linux hosts: the live deployment was macOS with Docker Desktop.

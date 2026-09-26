@@ -376,15 +376,17 @@ Do not provide token/cookie files or enable unofficial alternatives.
 
 ## Hermes boundary
 
-Recommended: **use the existing Hermes installation**, following its authoritative
-docs [H1]. Add the supplied [agent skill](skills/music-butler/SKILL.md)
-and an operator-owned constrained executor. The skill defines exact permitted
-file and command operations, rights confirmation, schema, truthful outcomes,
-retry and unavailable-content behavior. It is ready to adapt, but **a system
-prompt is not a security enforcement layer**: enforce its allowlist in the tool
-adapter/command policy and OS account. This repository does not pretend that
-Hermes exposes a preexisting `music_import` API or that an unrestricted terminal
-becomes safe just because the prompt says so.
+Recommended: **use your existing agent** (Hermes [H1], Claude Code, Codex,
+Copilot or any agent that loads `SKILL.md` skills) with the supplied
+[agent skill](skills/music-butler/SKILL.md). The skill defines the permitted file
+and command operations, rights checks, when to ask the user, the request schema,
+truthful reporting and backup behavior. Its only executor is
+[`scripts/butler.sh`](scripts/butler.sh), which accepts a 32-hex request id or a
+drive name and nothing else, so no chat text reaches Docker or a shell. But **a
+skill is not a security enforcement layer**: restrict the agent's command policy
+to writing `requests/approved-*.json` and running `scripts/butler.sh`, and remember
+that anyone who can message the agent can ask it for imports. An unrestricted
+terminal does not become safe just because the skill says so.
 
 Local executor: use Python 3.11+ (3.12 is used in the image). Install the
 helper/tool dependencies in a trusted directory and
@@ -393,18 +395,16 @@ writes only in the request inbox and a fixed script argv/stdin operation. Keep
 repository/scripts, PATH, allowlist and secrets administrator-owned. Do not give
 the model filesystem management, arbitrary downloader flags or sudo access.
 
-Container executor alternatives, for the **operator's adapter**, not arbitrary
-model-generated command strings:
+`butler.sh` runs each import as a one-shot container
+(`docker compose run --rm -T downloader < requests/approved-<id>.json`). An
+alternative for operators who prefer a persistent sandbox:
 
 ```sh
-# One-shot isolated import, existing Hermes passes data through a fixed adapter:
-docker compose run --rm -T downloader < requests/approved.json
-
 # Optional persistent execution environment (same image, no model/chat secrets):
 docker compose --profile hermes up -d hermes-exec
-# Adapter permits only this executable/stdin contract:
+# A fixed adapter permits only this executable/stdin contract:
 docker compose exec -T hermes-exec /opt/music-butler/scripts/download_music.sh \
-  < requests/approved.json
+  < requests/approved-<id>.json
 ```
 
 No Docker socket is mounted in these containers. An external adapter that talks
@@ -465,6 +465,15 @@ back up `.staging` as finished media. Test restore to alternate directories and
 loopback port; verify login, playlists, representative audio hashes and LRC
 before replacing production. Secrets may be revoked/rotated on restore.
 
+[`scripts/backup.sh`](scripts/backup.sh) implements this without downtime:
+`navidrome backup create` makes a consistent online SQLite copy, then restic
+takes an encrypted, deduplicated snapshot of the library, receipts, DB copies,
+`.env`, `secrets/` and `requests/` (retention 7 daily / 4 weekly / 12 monthly,
+5 % data verification per run). `restore-test` restores the latest snapshot to a
+temporary directory and compares every audio hash. It runs on demand
+(`scripts/butler.sh backup <drive>` for a USB drive); scheduling is left to the
+operator.
+
 ## Validation and explicit limitations
 
 [docs/VALIDATION.md](docs/VALIDATION.md) is the execution record. Deterministic
@@ -474,13 +483,14 @@ Validate Compose, shell syntax/lint, provider argument parsing, MP3/FLAC tags,
 artwork, transaction rollback, collision safety, locks, scan token/error handling
 and lyrics rate limits before upgrading. Deployment acceptance additionally
 requires testing your actual disk, authenticated Navidrome indexing, Tempo device,
-network exposure and backup restore. No claims of live Telegram/Tempo integration
-or legal correctness arise from offline tests.
+network exposure and backup restore. The live results of one real deployment
+(imports, indexing, Tempo over a Tailscale HTTPS proxy, backups, an agent-driven
+import) are recorded in VALIDATION; they are not a claim of legal correctness.
 
 Not included: Spotify streaming/authentication replacement, DRM/cookie support,
 artist discovery crawler, deduplication, robust malicious-tenant isolation,
 hard disk quotas, guaranteed album metadata matching, guaranteed lyrics, word
-karaoke timing, automatic backup infrastructure, TLS/VPN deployment, push
+karaoke timing, scheduled/off-site backups, TLS/VPN deployment, push
 notifications, or a full unrestricted Hermes container. The initial workflow is
 bounded per-track/per-release, single-library/single-disc metadata, and assumes
 operator-controlled storage/configuration. Hosts/providers may become unavailable;

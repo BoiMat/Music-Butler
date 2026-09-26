@@ -23,7 +23,9 @@ run `./scripts/setup.sh`, then `docker compose up -d`.
 Open **http://localhost:4533** immediately and create the first admin account.
 Keep the default loopback binding until onboarding is complete. Use a VPN or a
 TLS reverse proxy for your phone; `localhost` on Android is the phone, not the
-server. Create a **non-admin** playback account for Tempo.
+server. With Tailscale, `tailscale serve --bg 4533` gives a tailnet-only HTTPS URL
+while Navidrome stays on loopback (enable HTTPS certificates in the Tailscale admin
+console first). Create a **non-admin** playback account for Tempo.
 
 ## Import an approved song or album
 
