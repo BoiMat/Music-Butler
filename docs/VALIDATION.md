@@ -108,6 +108,24 @@ low-space test; the real importer retains its 2 GiB minimum-free-space check.
   File permissions and the independently permitted validations/build/smoke calls
   above provided the actual evidence.
 
+## Post-merge findings (2026-09-26)
+
+First real `./scripts/setup.sh --start` in the main checkout exposed two bugs
+that the offline/`config`-only checks above missed; both fixed with regression
+assertions in `tests/test_config.py`:
+
+- `LIBRARY_PATH` collided with the compiler variable that macOS CLT `python3`
+  exports (`/usr/local/lib`); Compose prefers the process environment over
+  `.env`, so setup tried to provision `/usr/local/lib`. Renamed to
+  `MUSIC_LIBRARY_PATH`.
+- Unquoted `tmpfs: [/tmp:rw,noexec,...]` is a YAML flow list, so the commas
+  produced five mounts and `docker compose up` failed with
+  `invalid mount path: 'mode=1777'`. Now quoted.
+
+After the fixes: 21 host tests pass (ShellCheck included), `docker compose up -d`
+brings Navidrome to `healthy` on `127.0.0.1:4533`, and the built downloader
+container returns `valid` for `config/request.example.json` under `--validate`.
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):

@@ -29,6 +29,8 @@ class ComposeConfig(unittest.TestCase):
             self.assertIn("ALL", svc["cap_drop"])
             self.assertIn("no-new-privileges:true", svc["security_opt"])
             self.assertFalse(svc.get("privileged", False))
+            # Unquoted YAML flow lists split tmpfs options into bogus mount paths.
+            self.assertEqual(svc["tmpfs"], ["/tmp:rw,noexec,nosuid,size=128m,mode=1777"])
             self.assertFalse(any("docker.sock" in v["source"] for v in svc["volumes"]))
             for v in svc["volumes"]:
                 self.assertTrue(Path(v["source"]).is_relative_to(ROOT), v["source"])

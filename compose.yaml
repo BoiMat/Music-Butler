@@ -23,7 +23,7 @@ x-tooling: &tooling
   networks: [music]
   mem_limit: 2g
   cpus: 2
-  tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=128m,mode=1777"]
   volumes:
     - type: bind
       source: ${MUSIC_LIBRARY_PATH:-./storage/library}
@@ -56,7 +56,7 @@ services:
     cpus: 2
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${NAVIDROME_PORT:-4533}:4533"
-    tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m,mode=1777"]
     environment:
       ND_MUSICFOLDER: /music
       ND_DATAFOLDER: /data
