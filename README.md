@@ -53,14 +53,26 @@ Navidrome's watcher plus a one-minute schedule arranges discovery without
 credentials. Optional admin `startScan` is described in the blueprint; a scan
 request is **not** a guarantee that the library is already indexed.
 
-## Hermes and Tempo
+## AI agent skill and Tempo
 
-- Copy/adapt [the Hermes system prompt](config/hermes-music-butler-system-prompt.md)
-  into your **existing** instance, with an operator-approved fixed executor.
-  JSON goes to the script's stdin; never interpolate a chat message into a shell.
-- Optional `hermes` profile starts an **execution sandbox**, not another Hermes
-  agent or messaging gateway: `docker compose --profile hermes up -d hermes-exec`.
-  See the [security boundary and installation choices](BLUEPRINT.md#hermes-boundary).
+[`skills/music-butler/SKILL.md`](skills/music-butler/SKILL.md) is a standard
+agent skill (`SKILL.md` with `name`/`description` front matter) for imports,
+library status and backups. Its commands are relative to this checkout; copy or
+symlink the folder into your agent's skills directory and replace `REPO` with the
+checkout path if the agent does not run from it. Typical locations (check your
+agent's docs): Claude Code `~/.claude/skills/`, Codex `~/.codex/skills/`, GitHub
+Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
+
+- Agents run only [`scripts/butler.sh`](scripts/butler.sh), which accepts a request
+  id or a drive name, never free text. Request data is a JSON file.
+- Configure your agent's command approval so it may write
+  `requests/approved-*.json` and run `scripts/butler.sh` and nothing broader. The
+  skill text guides the model; it is **not** an OS security boundary. An agent with
+  unrestricted terminal access keeps those powers, and anyone who can message it
+  can ask for imports.
+- Optional `hermes` profile starts an **execution sandbox**, not an agent or
+  messaging gateway: `docker compose --profile hermes up -d hermes-exec`.
+  See the [security boundary](BLUEPRINT.md#hermes-boundary).
 - Install [Tempo](https://github.com/CappielloAntonio/tempo/releases), add your
   reachable HTTPS/VPN Navidrome URL and playback credentials, refresh the library,
   play a song and open the lyrics panel. Synced lyrics highlight lines when the
@@ -74,10 +86,12 @@ request is **not** a guarantee that the library is already indexed.
 ├── compose.yaml / .env.example / .gitignore / .dockerignore
 ├── requirements.in / requirements.lock
 ├── config/
-│   ├── request.example.json
-│   └── hermes-music-butler-system-prompt.md
+│   └── request.example.json
+├── skills/music-butler/SKILL.md     # agent skill (any SKILL.md-aware agent)
 ├── docker/Dockerfile
 ├── scripts/
+│   ├── butler.sh                    # fixed agent entry point
+│   ├── backup.sh                    # encrypted restic backups
 │   ├── setup.sh
 │   ├── validate.sh
 │   ├── download_music.sh

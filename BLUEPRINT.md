@@ -377,8 +377,8 @@ Do not provide token/cookie files or enable unofficial alternatives.
 ## Hermes boundary
 
 Recommended: **use the existing Hermes installation**, following its authoritative
-docs [H1]. Add the supplied [system prompt](config/hermes-music-butler-system-prompt.md)
-and an operator-owned constrained executor. The prompt defines exact permitted
+docs [H1]. Add the supplied [agent skill](skills/music-butler/SKILL.md)
+and an operator-owned constrained executor. The skill defines exact permitted
 file and command operations, rights confirmation, schema, truthful outcomes,
 retry and unavailable-content behavior. It is ready to adapt, but **a system
 prompt is not a security enforcement layer**: enforce its allowlist in the tool
