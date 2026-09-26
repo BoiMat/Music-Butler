@@ -122,6 +122,17 @@ assertions in `tests/test_config.py`:
   produced five mounts and `docker compose up` failed with
   `invalid mount path: 'mode=1777'`. Now quoted.
 
+- Wikimedia's robot policy returned 403 to yt-dlp's default Chrome UA and to
+  `Python-urllib` artwork fetches. Non-YouTube downloads and artwork now send
+  `DOWNLOAD_USER_AGENT`, which must include contact info for Wikimedia.
+
+First live imports (both public domain): Scott Joplin *Maple Leaf Rag* (1916
+piano roll, upload.wikimedia.org, with Commons artwork) and Enrico Caruso *Over
+There* (1918, archive.org FLAC). Both completed, the authenticated scan returned
+`requested`, and Navidrome `search3` listed both songs. LRCLIB returned no synced
+lyrics for either (instrumental / not in database); the synced path was checked
+separately with a live lookup for a well-known song.
+
 After the fixes: 21 host tests pass (ShellCheck included), `docker compose up -d`
 brings Navidrome to `healthy` on `127.0.0.1:4533`, and the built downloader
 container returns `valid` for `config/request.example.json` under `--validate`.

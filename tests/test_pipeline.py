@@ -336,8 +336,9 @@ class Pipeline(unittest.TestCase):
         from mutagen.mp3 import MP3
         from mutagen.flac import FLAC
         ppm = b"P6\n2 2\n255\n" + b"\xff\x00\x00" * 4
-        with patch.object(b, "fetch", return_value=ppm):
+        with patch.object(b, "fetch", return_value=ppm) as fetch:
             cover = b.artwork({"artwork_url": "https://archive.org/test.ppm"}, self.root, dict(os.environ))
+            self.assertTrue(fetch.call_args.kwargs["headers"]["User-Agent"].startswith("music-butler/"))
         self.assertTrue(cover.startswith(b"\xff\xd8"))
         for fmt in ("mp3", "flac"):
             r = b.validate({**request(), "format": fmt, "quality": "192" if fmt == "mp3" else "5"})

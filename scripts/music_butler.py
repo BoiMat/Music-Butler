@@ -186,6 +186,10 @@ def spotdl_config(env):
         raise Failure("spotdl_credentials_unavailable", 69) from exc
 
 
+def download_agent():
+    return text(os.environ.get("DOWNLOAD_USER_AGENT") or f"music-butler/{VERSION}", "download_user_agent")
+
+
 def acquire(track, request, work, env):
     source = work / "source.flac"
     provider = "yt-dlp"
@@ -214,8 +218,7 @@ def acquire(track, request, work, env):
         # Archives such as Wikimedia reject bots posing as browsers; YouTube needs yt-dlp's default.
         agent = []
         if urllib.parse.urlsplit(track["url"]).hostname not in YOUTUBE_HOSTS:
-            agent = ["--user-agent", text(os.environ.get("DOWNLOAD_USER_AGENT") or f"music-butler/{VERSION}",
-                                          "download_user_agent")]
+            agent = ["--user-agent", download_agent()]
         run(["yt-dlp", "--ignore-config", "--no-plugin-dirs", "--no-playlist",
              "--no-progress", "--no-warnings", "--no-cache-dir", "--no-geo-bypass",
              "--js-runtimes", "node", "--socket-timeout", "30", "--retries", "2", "--fragment-retries", "2",
@@ -263,7 +266,7 @@ def artwork(track, work, env):
         return None
     try:
         raw = work / "cover.input"
-        raw.write_bytes(fetch(track["artwork_url"], limit=5242880))
+        raw.write_bytes(fetch(track["artwork_url"], headers={"User-Agent": download_agent()}, limit=5242880))
         jpg = work / "cover.jpg"
         run(["ffmpeg", "-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file,pipe",
              "-f", "image2", "-pattern_type", "none", "-i", str(raw),
