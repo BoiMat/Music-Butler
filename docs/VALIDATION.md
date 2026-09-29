@@ -162,6 +162,59 @@ relying on it.
   and falls back to `sha256sum` when there is no `shasum`.
 - README restore command corrected to `docker compose run --rm navidrome backup restore ...`.
 
+## Small-model / multi-song changes (2026-09-29) — partially executed
+
+Goal: the skill and `scripts/agent.py` work with a ~8 B local model and with
+several songs in one message.
+
+- New request shape `{"songs": [...]}` (grouped into releases by the importer),
+  sequential batch import ending in one `summary` line, `butler.sh add <id>`
+  (validate then import), readable request ids `[a-z0-9-]{1,64}`.
+- Agent: one `butler_add` tool (flat song list), compact results (summary or
+  errors only), `num_ctx` 16384, temperature 0.2. SKILL.md rewritten as short
+  imperative steps around the one file + one command flow.
+- Cover fallback: yt-dlp `--write-thumbnail`, centre-square crop → `source_thumbnail`.
+- LRCLIB: strict `/api/search` fallback after a 404 from `/api/get`.
+- Default allowlist adds `m.youtube.com`, `music.youtube.com`. An existing
+  `.env` keeps its own `DOWNLOAD_ALLOWED_HOSTS` until edited.
+
+Actually run, on Windows 11 with Python 3.12, FFmpeg on PATH, and mutagen 1.48.1 +
+yt-dlp 2026.8.19 in a venv. POSIX-only calls were stubbed (`flock`, `killpg`,
+`O_NOFOLLOW`, directory fsync), so **locking, signals and fsync were not tested**:
+
+- 23 of the importer tests passed, including real FFmpeg MP3/FLAC encodes, real
+  thumbnail crop to 180×180 from a 320×180 image, thumbnail embedding in an
+  ingest, batch continue/stop logic, songs grouping and per-song errors, the
+  strict lyrics fallback, and the real yt-dlp parser accepting the new flags.
+- 4 agent tests passed (the process-group test needs POSIX and was skipped).
+- `bash -n` on every script.
+
+Not run: the bash-script CLI tests, ShellCheck, Docker/Compose, a real YouTube
+download (whether `-x` keeps the written thumbnail is taken from yt-dlp's
+documented behaviour, not observed), live LRCLIB search, and any real small model.
+
+## Lookup and title cleaning (2026-09-29) — partially executed
+
+- `--lookup` / `butler.sh lookup <id>` / agent `butler_lookup`: YouTube search
+  (`ytsearch5:`) and link inspection, whitelisted output fields only, with
+  YouTube Music "Topic" results enriched with clean `artist`/`track`.
+- SKILL.md: lookup → pick (Topic > official audio > lyric video, avoid
+  videos/live/extended) → clean titles (drop video labels, keep feat./remix/live/
+  remaster) → add. Songs asked for one by one get no `album`.
+
+Actually run on Windows (same setup and stubs as above): 28 importer tests and
+5 agent tests pass (1 POSIX-only skip), including the real yt-dlp parser on the
+lookup flags and `capture()` against a real child process. A **live
+metadata-only lookup** also ran (nothing downloaded) for "Daft Punk Get Lucky"
+and "Scott Joplin The Entertainer". It returned 5 real candidates each; the
+"Scott Joplin - Topic" result came back enriched with `artist: Scott Joplin`,
+`track: The Entertainer`. Windows needed `SYSTEMROOT` added to the child
+environment for sockets. The Linux container does not; this was injected only
+in the test harness.
+
+Not run: lookup inside the container, and a real small model choosing results
+and cleaning titles.
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):

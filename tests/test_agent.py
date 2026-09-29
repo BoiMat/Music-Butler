@@ -25,35 +25,66 @@ class Tools(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_write_request_tool_creates_file(self):
-        args = {"kind": "song", "artist": "A", "album": "B", "format": "mp3", "quality": "",
-                "junk": 1, "tracks": [{"title": "T", "url": "https://archive.org/download/x/t.flac",
-                                       "artwork_url": None}]}
-        result = agent.call_tool("butler_write_request", json.dumps(args))
-        rid = result.split("id: ")[1].split()[0]
-        self.assertRegex(rid, r"^[0-9a-f]{32}$")
+    def test_add_writes_songs_file_and_runs_add_without_timeout(self):
+        args = {"format": "", "junk": 1, "songs": [
+            {"artist": "A", "title": "T", "url": "https://archive.org/download/x/t.flac",
+             "album": "", "artwork_url": None, "year": 1999},
+            {"artist": "B", "title": "U", "url": "https://youtu.be/abc"}]}
+        with patch.object(agent, "run_butler", return_value=(0, "")) as run:
+            agent.call_tool("butler_add", json.dumps(args))
+        command, timeout = run.call_args.args
+        self.assertEqual(command[0], "add")
+        self.assertIsNone(timeout)
+        written = json.loads((Path(self.tmp.name) / f"approved-{command[1]}.json").read_text(encoding="utf-8"))
+        # Empty/unknown keys a small model adds are dropped; the importer validates the rest.
+        self.assertEqual(written, {"songs": [
+            {"artist": "A", "title": "T", "url": "https://archive.org/download/x/t.flac"},
+            {"artist": "B", "title": "U", "url": "https://youtu.be/abc"}]})
+
+    def test_single_song_object_is_wrapped(self):
+        with patch.object(agent, "run_butler", return_value=(0, "")) as run:
+            agent.call_tool("butler_add", {"songs": {"artist": "A", "title": "T", "url": "https://youtu.be/x"}})
+        rid = run.call_args.args[0][1]
         written = json.loads((Path(self.tmp.name) / f"approved-{rid}.json").read_text(encoding="utf-8"))
-        # Empty/unknown keys a small model adds are dropped; the importer still validates the rest.
-        self.assertEqual(written, {"kind": "song", "artist": "A", "album": "B", "format": "mp3",
-                                   "tracks": [{"title": "T", "url": "https://archive.org/download/x/t.flac"}]})
+        self.assertEqual(len(written["songs"]), 1)
+
+    def test_lookup_writes_lookup_file_with_bounded_timeout(self):
+        line = '{"event": "lookup", "search": [{"query": "a b", "results": []}], "urls": []}'
+        with patch.object(agent, "run_butler", return_value=(0, "noise\n" + line)) as run:
+            result = agent.call_tool("butler_lookup", {"search": "Daft Punk Get Lucky", "urls": ["", None]})
+        command, timeout = run.call_args.args
+        self.assertEqual((command[0], timeout), ("lookup", agent.LOOKUP_TIMEOUT))
+        self.assertIsNotNone(timeout)
+        written = json.loads((Path(self.tmp.name) / f"lookup-{command[1]}.json").read_text(encoding="utf-8"))
+        self.assertEqual(written, {"search": ["Daft Punk Get Lucky"]})
+        self.assertEqual(json.loads(result.splitlines()[1])["event"], "lookup")
 
     def test_bad_arguments_never_raise(self):
         with patch.object(agent, "run_butler") as run:
-            for name, args in [("butler_validate", {}), ("butler_import", {"id": "../etc"}),
-                               ("butler_import", {"id": 5}), ("butler_validate", "not json"),
-                               ("butler_backup", {"drive": ["x"]}), ("butler_status", [1])]:
+            for name, args in [("butler_add", {}), ("butler_add", {"songs": []}),
+                               ("butler_lookup", {}), ("butler_lookup", {"search": [""]}),
+                               ("butler_add", "not json"), ("butler_backup", {"drive": ["x"]}),
+                               ("butler_status", [1])]:
                 with self.subTest(name=name, args=args):
                     self.assertTrue(agent.call_tool(name, args).startswith("error:"))
             run.assert_not_called()
             self.assertTrue(agent.call_tool("rm_rf", {}).startswith("Unknown tool"))
 
-    def test_import_has_no_agent_timeout(self):
-        rid = "0" * 32
-        with patch.object(agent, "run_butler", return_value=(0, "ok")) as run:
-            agent.call_tool("butler_import", {"id": rid})
-            run.assert_called_once_with(["import", rid], None)
-            agent.call_tool("butler_validate", {"id": rid})
-            run.assert_called_with(["validate", rid], agent.TIMEOUT)
+    def test_compact_keeps_only_summary_or_errors(self):
+        out = "\n".join([
+            '{"event": "valid", "releases": [], "tracks": 2}',
+            '{"event": "started", "request_id": "x", "tracks": 1}',
+            '{"event": "complete", "path": "/library/music/very/long", "tracks": [{"sha256": "' + "f" * 64 + '"}]}',
+            '[stderr]', 'noise',
+            '{"event": "summary", "ok": true, "added": [], "failed": [], "not_attempted": []}'])
+        result = agent.compact(0, out)
+        self.assertEqual(result.splitlines()[0], "exit 0")
+        self.assertEqual(json.loads(result.splitlines()[1])["event"], "summary")
+        self.assertNotIn("sha256", result)
+        errors = agent.compact(65, '{"event": "error", "code": 65, "reason": "source_url_not_allowed", "song": 2}')
+        self.assertIn("nothing was done", errors)
+        self.assertIn('"song": 2', errors)
+        self.assertTrue(agent.compact(64, "invalid request id").endswith("invalid request id"))
 
 
 @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups required")

@@ -1,11 +1,7 @@
 {
-  "kind": "song",
-  "artist": "Your authorized artist",
-  "album": "Your authorized release",
-  "format": "mp3",
-  "quality": "192",
-  "tracks": [
+  "songs": [
     {
+      "artist": "Your authorized artist",
       "title": "Your track",
       "url": "https://archive.org/download/REPLACE_WITH_VERIFIED_ITEM/REPLACE_WITH_AUDIO_FILE.flac"
     }

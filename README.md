@@ -26,32 +26,54 @@ server. With Tailscale, `tailscale serve --bg 4533` gives a tailnet-only HTTPS U
 while Navidrome stays on loopback (enable HTTPS certificates in the Tailscale admin
 console first). Create a **non-admin** playback account for Tempo.
 
-## Import an approved song or album
+## Import approved songs and albums
 
 ```sh
 docker compose --profile tools build downloader
 mkdir -p requests
-cp config/request.example.json requests/approved.json
+cp config/request.example.json requests/approved-mine.json
 # Edit every placeholder: accurate metadata and exact audio URLs.
 # Never execute the example unchanged.
-docker compose run --rm -T downloader --validate < requests/approved.json
-docker compose run --rm -T downloader < requests/approved.json
+./scripts/butler.sh add mine     # validates, then imports; nothing downloads unless all is valid
 ```
 
-For an album, set `kind` to `album` and list **each track in order**.
-No artist-wide crawling or automatic search-to-download. MP3 quality is
+One request can hold many songs:
+`{"songs": [{"artist", "title", "url", "album"?, "artwork_url"?}, ...], "format"?, "quality"?}`.
+Songs that share artist and album become one album in list order. Songs without
+`album` become singles named after the song. Releases are imported one after
+another. A bad or unavailable source skips to the next release; storage or lock
+problems stop the batch. The original single-release format (`kind`, `artist`,
+`album`, `tracks`) still works; see the [blueprint](BLUEPRINT.md#exact-downloader-contract).
+`butler.sh lookup` only returns search candidates. The agent chooses, and every
+imported track is an explicit URL in the request. No artist-wide crawling or
+playlist expansion. MP3 quality is
 `128|192|256|320`; FLAC compression is `0`–`8` (strings). Lossy-to-FLAC
 conversion cannot restore quality.
 
-Set `LRCLIB_USER_AGENT` in `.env` to your application name/version and **real
-contact email or project URL** to enable synchronized lyrics. Blank disables
-lookups. Optional `artwork_url` per track supplies an authorized image. It
-follows the source URL policy; redirects are followed only to allowlisted hosts
-(and, when `archive.org` is allowed, its `*.archive.org` download mirrors). Missing
-artwork or synced lyrics does not prevent import.
+**Tags** (title, artist, album artist, album, track n/total) always come from
+the request, never from YouTube/provider metadata. So a YouTube video titled
+"Artist - Song (Official Video) [HD]" is still tagged exactly as requested.
+Year, genre and disc numbers are not set.
 
-Success emits a JSON `complete` event with files, hashes, lyrics/artwork status
-and scan status. The **whole album** appears atomically in the library.
+**Cover art:** an optional `artwork_url` (on an allowed host) is used first.
+Otherwise the source's own thumbnail (for YouTube, the video thumbnail) is
+centre-cropped to a square and embedded. For "Official Audio"/art-track uploads
+that is the release cover; for music videos it is a video frame. The receipt
+says which (`embedded`, `source_thumbnail`, `unavailable`). Artwork redirects
+are followed only to allowlisted hosts (plus `*.archive.org` download mirrors
+when `archive.org` is allowed).
+
+**Lyrics:** set `LRCLIB_USER_AGENT` in `.env` to your application name/version
+and **real contact email or project URL** to enable synchronized lyrics. Blank
+disables lookups. The lookup matches on artist, title and the downloaded
+file's duration (±2 s). A YouTube upload with an intro, outro or dialogue has a
+different duration and usually gets no lyrics, which is why the skill prefers
+"Official Audio" uploads. Missing artwork or synced lyrics does not prevent import.
+
+Each release emits a JSON `complete` event with files, hashes, lyrics/artwork
+status and scan status. The last line is always one `summary` event listing what
+was `added`, what `failed`, and what was `not_attempted`. Retry only the latter
+two; re-adding creates duplicates. Each **whole album** appears atomically in the library.
 Navidrome's watcher plus a one-minute schedule arranges discovery without
 credentials. Optional admin `startScan` is described in the blueprint; a scan
 request is **not** a guarantee that the library is already indexed.
@@ -61,9 +83,12 @@ request is **not** a guarantee that the library is already indexed.
 [`scripts/agent.py`](scripts/agent.py) is a small, standard-library-only chat
 agent that runs a local [Ollama](https://ollama.com) model on your own machine
 (16 GB is plenty for a 7–8 B model). It loads the
-[agent skill](skills/music-butler/SKILL.md) as its system prompt, writes request
-files through a structured tool and calls the same fixed `scripts/butler.sh`
-commands, so nothing new reaches Docker or a shell.
+[agent skill](skills/music-butler/SKILL.md) as its system prompt. It has two
+music tools. `butler_lookup` searches YouTube for "artist title" texts and
+returns candidates. `butler_add` takes a list of songs, writes the request file
+and runs `scripts/butler.sh add`. The model only sees compact results, so a
+small model can handle several songs in one message. Nothing new reaches Docker
+or a shell.
 
 ```sh
 ollama pull qwen2.5:7b          # or any small model you prefer
@@ -71,17 +96,18 @@ ollama serve                    # if not already running
 python3 scripts/agent.py        # from this repository
 ```
 
-The agent has **no web access**, so you supply the source. For example: "add
-Scott Joplin, The Entertainer, single 'The Entertainer', from
-https://upload.wikimedia.org/.../The_Entertainer.ogg". It writes
-`requests/approved-<id>.json`, validates it, and imports it. If you don't give
-a URL, it asks for one. Typing `write-request` lets you paste a request JSON
-yourself and have the agent validate and import it.
+Just name the songs: "add Get Lucky by Daft Punk and The Entertainer by Scott
+Joplin". It looks them up, picks the best upload (YouTube Music "Topic" audio,
+then official audio, then lyric videos), cleans the titles for tagging, adds
+them, and reports. You can also paste links. Typing `write-request` lets you
+paste a request JSON yourself; it is added directly and the model reports the
+result.
 
 Configuration is environment: `OLLAMA_MODEL` (default `qwen2.5:7b`),
-`OLLAMA_BASE_URL` (default `http://localhost:11434`), `BUTLER_TIMEOUT`
-seconds (default `3600`) for Ollama replies and the short `validate`/`status`/`drives`
-commands. Imports and backups have no agent-side timeout because the importer
+`OLLAMA_BASE_URL` (default `http://localhost:11434`), `OLLAMA_NUM_CTX` (default
+`16384`; Ollama's own default window is too small for the skill), and
+`BUTLER_TIMEOUT` seconds (default `3600`) for Ollama replies and the short
+`status`/`drives` commands (lookups are capped at 900 s). Imports and backups have no agent-side timeout because the importer
 limits each download/encode step itself. Ctrl+C sends SIGTERM to the running
 `butler.sh` and its `docker compose` client; check `status` before retrying an
 import. The agent still needs Docker/Compose and the same
@@ -100,7 +126,10 @@ Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
 - Agents run only [`scripts/butler.sh`](scripts/butler.sh), which accepts a request
   id or a drive name, never free text. Request data is a JSON file.
 - Configure your agent's command approval so it may write
-  `requests/approved-*.json` and run `scripts/butler.sh` and nothing broader. The
+  `requests/approved-*.json` and `requests/lookup-*.json` and run
+  `scripts/butler.sh` and nothing broader. The skill works without the agent's
+  own web search: `butler.sh lookup` searches YouTube through yt-dlp in the
+  downloader container. The
   skill text guides the model; it is **not** an OS security boundary. An agent with
   unrestricted terminal access keeps those powers, and anyone who can message it
   can ask for imports.

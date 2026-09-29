@@ -105,6 +105,52 @@ class Contract(unittest.TestCase):
         with self.assertRaises(b.Failure):
             b.NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.test")
 
+    def test_songs_format_groups_releases(self):
+        songs = {"songs": [
+            {"artist": "A", "title": "Single One", "url": "https://youtu.be/one"},
+            {"artist": "B", "title": "Track 1", "album": "LP", "url": "https://archive.org/download/lp/1.flac"},
+            {"artist": "A", "title": "Single Two", "url": "https://music.youtube.com/watch?v=two", "album": " "},
+            {"artist": "b", "title": "Track 2", "album": "lp", "url": "https://archive.org/download/lp/2.flac",
+             "artwork_url": ""}]}
+        releases = b.parse(songs)
+        self.assertEqual([(r["kind"], r["artist"], r["album"], [t["title"] for t in r["tracks"]]) for r in releases], [
+            ("song", "A", "Single One", ["Single One"]),
+            ("album", "B", "LP", ["Track 1", "Track 2"]),
+            ("song", "A", "Single Two", ["Single Two"])])
+        self.assertTrue(all(r["format"] == "mp3" and r["quality"] == "192" for r in releases))
+        self.assertNotIn("artwork_url", releases[1]["tracks"][1])
+        flac = b.parse({**songs, "format": "flac"})
+        self.assertTrue(all(r["quality"] == "5" for r in flac))
+
+    def test_songs_format_errors_name_the_song(self):
+        good = {"artist": "A", "title": "T", "url": "https://youtu.be/one"}
+        for songs, reason, item in [
+                ([good, {**good, "url": "https://evil.test/x"}], "source_url_not_allowed", 2),
+                ([good, {**good, "title": "Other"}], "duplicate_source_url", 2),
+                ([{**good, "kind": "song"}], "invalid_song_keys", 1),
+                ([{**good, "artist": ""}], "invalid_artist", 1)]:
+            with self.subTest(reason=reason), self.assertRaises(b.Failure) as cm:
+                b.parse({"songs": songs})
+            self.assertEqual((str(cm.exception), cm.exception.item), (reason, item))
+        for bad in [{"songs": []}, {"songs": [good] * 101}, {"songs": [good], "kind": "song"},
+                    {"songs": [good], "format": "wav"}]:
+            with self.subTest(bad=str(bad)[:40]), self.assertRaises(b.Failure):
+                b.parse(bad)
+
+    def test_cli_songs_validate(self):
+        body = {"songs": [{"artist": "A", "title": "T", "url": "https://youtu.be/one"},
+                          {"artist": "A", "title": "U", "url": "https://youtu.be/two"}]}
+        p = subprocess.run([str(ROOT / "scripts/download_music.sh"), "--validate"],
+                           input=json.dumps(body), text=True, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        event = json.loads(p.stdout)
+        self.assertEqual((event["event"], len(event["releases"]), event["tracks"]), ("valid", 2, 2))
+        body["songs"][1]["url"] = "http://youtu.be/two"
+        p = subprocess.run([str(ROOT / "scripts/download_music.sh"), "--validate"],
+                           input=json.dumps(body), text=True, capture_output=True)
+        self.assertEqual(p.returncode, 65)
+        self.assertEqual(json.loads(p.stdout)["song"], 2)
+
     def test_allowed_hosts_tolerates_spaces(self):
         with patch.dict(os.environ, {"DOWNLOAD_ALLOWED_HOSTS": "archive.org, YouTube.com ,"}):
             self.assertEqual(b.allowed_hosts(), {"archive.org", "youtube.com"})
@@ -154,6 +200,141 @@ class NetworkMocks(unittest.TestCase):
                 self.assertEqual(fetch.call_count, 1)
                 self.assertGreater(float(lyrics.cooldown.read_text()), time.time())
 
+    def test_validate_lookup(self):
+        self.assertEqual(b.validate_lookup({"search": "Daft Punk Get Lucky"}),
+                         {"search": ["Daft Punk Get Lucky"], "urls": []})
+        self.assertEqual(b.validate_lookup({"urls": ["https://youtu.be/abc"]})["urls"], ["https://youtu.be/abc"])
+        for bad, item in [({"search": ["ok", "x\ny"]}, 2), ({"search": ["ok"], "urls": ["https://evil.test/a"]}, 2),
+                          ({"search": [""]}, 1)]:
+            with self.subTest(bad=bad), self.assertRaises(b.Failure) as cm:
+                b.validate_lookup(bad)
+            self.assertEqual(cm.exception.item, item)
+        for bad in [{}, {"search": []}, {"search": ["a"] * 11}, {"search": ["a"], "q": 1}, ["a"]]:
+            with self.subTest(bad=bad), self.assertRaises(b.Failure):
+                b.validate_lookup(bad)
+        with patch.dict(os.environ, {"DOWNLOAD_ALLOWED_HOSTS": "archive.org"}):
+            with self.assertRaisesRegex(b.Failure, "youtube_search_not_allowed"):
+                b.validate_lookup({"search": ["a"]})
+
+    def test_lookup_returns_only_safe_fields(self):
+        flat = [
+            {"id": "AAAAAAAAAAA", "ie_key": "Youtube", "title": "Song (Official Video) [HD]", "channel": "ArtistVEVO",
+             "duration": 245.0, "url": "https://rr1---sn.googlevideo.com/signed?sig=SECRET"},
+            {"id": "BBBBBBBBBBB", "ie_key": "Youtube", "title": "Song", "channel": "Artist - Topic", "duration": 231},
+            {"id": "CCCCCCCCCCC", "ie_key": "Youtube", "title": "Live now", "channel": "X", "live_status": "is_live"},
+            {"id": "DDDDDDDDDDD", "ie_key": "Youtube", "title": "10 hour loop", "channel": "Y", "duration": 36000},
+            {"id": "UCchannel-not-a-video", "ie_key": "YoutubeTab", "title": "Artist", "channel": "Artist"}]
+        full = {"id": "BBBBBBBBBBB", "extractor_key": "Youtube", "title": "Song", "channel": "Artist - Topic",
+                "duration": 231, "artist": "Artist", "track": "Song​", "album": "LP",
+                "formats": [{"url": "https://rr1---sn.googlevideo.com/signed?sig=SECRET"}]}
+        calls = []
+        def fake_capture(argv, cwd, env, **kwargs):
+            calls.append(argv)
+            self.assertNotIn("NAVIDROME_PASSWORD_FILE", env)
+            self.assertEqual(argv[:3], ["yt-dlp", "--ignore-config", "--no-plugin-dirs"])
+            if argv[-1].startswith("ytsearch"):
+                self.assertEqual(argv[-2:], ["--", "ytsearch5:Artist Song"])
+                return flat
+            if argv[-1] == "https://youtu.be/broken":
+                raise b.Failure("media_tool_failed", 69)
+            return [full]
+        with patch.object(b, "capture", side_effect=fake_capture), contextlib.redirect_stdout(io.StringIO()) as output:
+            b.lookup({"search": ["Artist Song"], "urls": ["https://youtu.be/BBBBBBBBBBB", "https://youtu.be/broken"]})
+        line = output.getvalue().strip()
+        self.assertNotIn("SECRET", line)
+        self.assertNotIn("album", line)  # album would make the model group singles into a fake album
+        event = json.loads(line)
+        results = event["search"][0]["results"]
+        self.assertEqual([r["url"] for r in results], ["https://www.youtube.com/watch?v=AAAAAAAAAAA",
+                                                       "https://www.youtube.com/watch?v=BBBBBBBBBBB"])
+        self.assertEqual(results[1], {"title": "Song", "channel": "Artist - Topic", "duration": 231,
+                                      "url": "https://www.youtube.com/watch?v=BBBBBBBBBBB",
+                                      "artist": "Artist", "track": "Song"})
+        self.assertNotIn("track", results[0])  # only Topic results are enriched
+        self.assertEqual(event["urls"][0]["track"], "Song")
+        self.assertEqual(event["urls"][1], {"url": "https://youtu.be/broken", "error": "lookup_failed"})
+        self.assertEqual(len(calls), 4)  # search, 1 Topic enrichment, 2 urls
+
+    def test_lookup_search_failure_is_per_query_but_interrupt_propagates(self):
+        with patch.object(b, "capture", side_effect=b.Failure("media_tool_timeout", 69)), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            b.lookup({"search": ["a", "b"], "urls": []})
+        self.assertEqual(json.loads(output.getvalue())["search"],
+                         [{"query": "a", "error": "search_failed"}, {"query": "b", "error": "search_failed"}])
+        with patch.object(b, "capture", side_effect=b.Failure("interrupted", 143)), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(b.Failure):
+            b.lookup({"search": ["a"], "urls": []})
+
+    def test_real_ytdlp_parser_accepts_lookup_flags(self):
+        import yt_dlp
+        argvs = []
+        with patch.object(b, "capture", side_effect=lambda argv, *a, **k: argvs.append(argv) or []), \
+                contextlib.redirect_stdout(io.StringIO()):
+            b.lookup({"search": ["Artist Song"], "urls": ["https://youtu.be/BBBBBBBBBBB"]})
+        self.assertEqual(len(argvs), 2)
+        for argv in argvs:
+            yt_dlp.parse_options(argv[1:])
+
+    def test_capture_parses_child_json_lines(self):
+        code = "import json; print(json.dumps({'a': 1})); print(); print(json.dumps({'b': 2}))"
+        self.assertEqual(b.capture([sys.executable, "-c", code], self.root, dict(os.environ)), [{"a": 1}, {"b": 2}])
+        with self.assertRaisesRegex(b.Failure, "response_too_large"):
+            b.capture([sys.executable, "-c", "print('x' * 100)"], self.root, dict(os.environ), limit=10)
+
+    def test_lyrics_search_fallback_is_strict(self):
+        def hit(**changes):
+            return {"artistName": "Test Artist", "trackName": "Test Tone", "duration": 181.0,
+                    "syncedLyrics": "[00:01.00]Found", **changes}
+        not_found = urllib.error.HTTPError("", 404, "", {}, None)
+        with patch.dict(os.environ, {"LRCLIB_USER_AGENT": "offline-test"}), patch.object(b.time, "sleep"):
+            dest = self.root / "test.mp3"
+            track = request()["tracks"][0]
+            for results, expected in [
+                    ([hit(artistName="Someone Else"), hit(duration=190.0), hit(syncedLyrics=None), hit()], "synced"),
+                    ([hit(artistName="Someone Else"), hit(duration=184.0)], "unavailable"),
+                    ({"unexpected": "object"}, "unavailable")]:
+                with self.subTest(expected=expected), patch.object(
+                        b, "fetch", side_effect=[not_found, json.dumps(results).encode()]) as fetch:
+                    self.assertEqual(b.Lyrics(self.root).get(request(), track, 180.4, dest), expected)
+                    self.assertIn("/api/search?", fetch.call_args_list[1].args[0])
+                    self.assertNotIn("album_name", fetch.call_args_list[1].args[0])
+            self.assertEqual(dest.with_suffix(".lrc").read_text(), "[00:01.00]Found")
+
+    def test_import_all_continues_past_bad_sources_and_stops_on_storage(self):
+        releases = b.parse({"songs": [
+            {"artist": "A", "title": f"S{n}", "url": f"https://youtu.be/s{n}"} for n in range(1, 5)]})
+        track = {"title": "x", "lyrics": "synced", "artwork": "source_thumbnail"}
+        outcomes = iter([{"scan": "scheduled", "tracks": [{**track, "title": "S1"}], "path": "/p"},
+                         b.Failure("media_tool_failed", 69), b.Failure("insufficient_free_space", 73)])
+        def fake_ingest(release):
+            result = next(outcomes)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        with patch.object(b, "ingest", side_effect=fake_ingest) as ingest, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = b.import_all(releases)
+        self.assertEqual(code, 69)
+        self.assertEqual(ingest.call_count, 3)
+        summary = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(summary["event"], "summary")
+        self.assertFalse(summary["ok"])
+        self.assertEqual([r["album"] for r in summary["added"]], ["S1"])
+        self.assertEqual(summary["added"][0]["songs"], [{**track, "title": "S1"}])
+        self.assertEqual([(r["album"], r["reason"]) for r in summary["failed"]],
+                         [("S2", "media_tool_failed"), ("S3", "insufficient_free_space")])
+        self.assertEqual([r["album"] for r in summary["not_attempted"]], ["S4"])
+
+    def test_import_all_reports_published_release_as_added(self):
+        releases = b.parse({"songs": [{"artist": "A", "title": "S1", "url": "https://youtu.be/s1"}]})
+        failure = OSError("scan write failed")
+        failure.butler_published = "/library/music/A--S1--id"
+        with patch.object(b, "ingest", side_effect=failure), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.import_all(releases), 73)
+        summary = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(summary["added"][0]["warning"], "published_check_before_retry")
+        self.assertEqual(summary["failed"], [])
+
     def test_scan_post_token_and_errors(self):
         secret = self.root / "password"
         secret.write_text("test-only-password\n")
@@ -181,6 +362,8 @@ class NetworkMocks(unittest.TestCase):
             self.assertEqual(argv[0], "yt-dlp")
             self.assertEqual(argv[-2:], ["--", r["tracks"][0]["url"]])
             self.assertIn("--ignore-config", argv)
+            self.assertIn("--write-thumbnail", argv)
+            self.assertIn("thumbnail:" + str(work / "thumb.%(ext)s"), argv)
             self.assertEqual(argv[argv.index("--user-agent") + 1], f"music-butler/{b.VERSION}")
             (work / "source.flac").write_bytes(b"fixture")
         # The default agent is asserted, so ignore any DOWNLOAD_USER_AGENT in the tester's shell.
@@ -323,6 +506,39 @@ class Pipeline(unittest.TestCase):
         self.assertIn("published_reconcile_before_retry", output.getvalue())
         receipt = json.loads(next((self.root / "logs").glob("*.json")).read_text())
         self.assertEqual(receipt["status"], "published_reconcile_required")
+
+    def test_source_thumbnail_becomes_square_cover(self):
+        work = self.root / "thumb-work"
+        work.mkdir()
+        # A 16:9 "YouTube" thumbnail: 320x180 with a red centre square and blue bars.
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=320x180",
+                        "-vf", "drawbox=x=70:y=0:w=180:h=180:color=red:t=fill", "-frames:v", "1",
+                        str(work / "thumb.png")], check=True)
+        cover = b.source_thumbnail(work, dict(os.environ))
+        self.assertTrue(cover.startswith(b"\xff\xd8"))
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "stream=width,height", "-of", "json", str(work / "thumb-cover.jpg")],
+                               check=True, capture_output=True, text=True)
+        stream = json.loads(probe.stdout)["streams"][0]
+        self.assertEqual((stream["width"], stream["height"]), (180, 180))
+        empty = self.root / "no-thumbnail"
+        empty.mkdir()
+        self.assertIsNone(b.source_thumbnail(empty, dict(os.environ)))
+
+    def test_ingest_uses_thumbnail_when_no_artwork_url(self):
+        from mutagen.mp3 import MP3
+        def with_thumbnail(track, request, work, env):
+            path, provider = self.acquire(track, request, work, env)
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=red:s=64x36",
+                            "-frames:v", "1", str(work / "thumb.jpg")], check=True)
+            return path, provider
+        with patch.object(b, "acquire", side_effect=with_thumbnail), patch.object(b.Lyrics, "get", return_value="unavailable"), \
+                patch.object(b, "scan", return_value="scheduled"), contextlib.redirect_stdout(io.StringIO()):
+            result = b.ingest(b.validate(request()))
+        self.assertEqual(result["tracks"][0]["artwork"], "source_thumbnail")
+        self.assertEqual(result["tracks"][0]["title"], "Test Tone")
+        audio = next(Path(result["path"]).glob("*.mp3"))
+        self.assertEqual(len(MP3(audio).tags.getall("APIC")), 1)
 
     def test_real_artwork_encoding(self):
         from mutagen.mp3 import MP3

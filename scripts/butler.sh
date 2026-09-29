@@ -10,20 +10,25 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 usage() {
     cat >&2 <<'EOF'
 Usage: scripts/butler.sh <command>
+  lookup <id>      search YouTube / read source metadata for requests/lookup-<id>.json
+                   (downloads nothing)
+  add <id>         validate requests/approved-<id>.json, then import it if valid
   validate <id>    check requests/approved-<id>.json offline (no download)
   import <id>      import requests/approved-<id>.json into the library
   status           Navidrome health and library contents
   drives           list mounted external drives (macOS /Volumes, Linux /media)
   backup [drive]   encrypted backup to <drive mount>/music-butler-restic,
                    or to BACKUP_REPOSITORY from .env when no drive is given
-<id> is 32 lowercase hex characters.
+<id> is 1-64 lowercase letters, digits and dashes, e.g. joplin-entertainer.
 EOF
     exit 64
 }
 
+# request_file <kind> <id>: requests/<kind>-<id>.json, kind is approved or lookup.
 request_file() {
-    [[ "${1:-}" =~ ^[0-9a-f]{32}$ ]] || { echo 'invalid request id' >&2; exit 64; }
-    local file="requests/approved-$1.json"
+    # No dots or slashes, so an id can never leave requests/.
+    [[ "${2:-}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'invalid request id: use lowercase letters, digits, dashes' >&2; exit 64; }
+    local file="requests/$1-$2.json"
     [[ -f "$file" && ! -L "$file" ]] || { echo "missing $file" >&2; exit 66; }
     printf '%s' "$file"
 }
@@ -65,12 +70,22 @@ drives() {
 compose=(docker compose --progress quiet)
 
 case "${1:-}" in
+    lookup)
+        file="$(request_file lookup "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --lookup < "$file"
+        ;;
+    add)
+        # One step for agents: nothing is downloaded unless the whole request is valid.
+        file="$(request_file approved "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --validate < "$file"
+        "${compose[@]}" run --rm -T downloader < "$file"
+        ;;
     validate)
-        file="$(request_file "${2:-}")"
+        file="$(request_file approved "${2:-}")"
         "${compose[@]}" run --rm -T downloader --validate < "$file"
         ;;
     import)
-        file="$(request_file "${2:-}")"
+        file="$(request_file approved "${2:-}")"
         "${compose[@]}" run --rm -T downloader < "$file"
         ;;
     status)

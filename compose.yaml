@@ -38,7 +38,7 @@ x-tooling: &tooling
         create_host_path: false
   environment:
     LIBRARY_ROOT: /library
-    DOWNLOAD_ALLOWED_HOSTS: ${DOWNLOAD_ALLOWED_HOSTS:-archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,youtu.be}
+    DOWNLOAD_ALLOWED_HOSTS: ${DOWNLOAD_ALLOWED_HOSTS:-archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,youtu.be,m.youtube.com,music.youtube.com}
     DOWNLOAD_USER_AGENT: ${DOWNLOAD_USER_AGENT:-}
     LRCLIB_USER_AGENT: ${LRCLIB_USER_AGENT:-}
     NAVIDROME_URL: http://navidrome:4533

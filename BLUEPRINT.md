@@ -8,11 +8,12 @@ accurate metadata. Do not circumvent paywalls, DRM, access controls, region
 restrictions, or authentication. No cookies, browser credential extraction,
 user impersonation, or premium-audio ripping is provided.
 
-A request that only says “get this artist/album” starts a confirmation and source
-selection conversation with the agent. It does **not** start unrestricted
-searching and downloading. This sacrifices automatic catalog matching to avoid
-importing the wrong recording. Each album track needs an explicitly
-approved URL; artist-wide requests and remote playlist expansion are unsupported.
+A request for songs by name starts a bounded source selection by the agent:
+`butler.sh lookup` returns up to 5 YouTube candidates per song (downloading
+nothing), and the agent picks one per song by the skill's rules, asking the user
+when only other versions fit. It does **not** start unrestricted searching and
+downloading. Each imported track is an explicit URL in a request file;
+artist-wide requests and remote playlist expansion are unsupported.
 
 ### Architecture
 
@@ -178,7 +179,18 @@ Node for yt-dlp's supported JS challenges. A local installation must provision
 these in a trusted PATH; `.env` is Compose configuration, not automatically
 loaded by the script.
 
-See [`config/request.example.json`](config/request.example.json). Full schema:
+See [`config/request.example.json`](config/request.example.json). Two request
+shapes are accepted.
+
+**Songs list (recommended, what the agent skill writes):** `{"songs": [...],
+"format"?, "quality"?}` with 1–100 songs. Each song has exactly the keys
+`artist`, `title`, `url` (required) and `album`, `artwork_url` (optional; empty
+means absent). Songs sharing artist and album (case-insensitive) become one
+`album` release in list order; a song without `album` becomes a `song` release
+whose album is its title. `format`/`quality` apply to all. Validation errors
+carry `"song": N` (1-based).
+
+**Single release (original contract):**
 
 | Key | Rules |
 |---|---|
@@ -219,8 +231,12 @@ JSON: `LIBRARY_ROOT`, `DOWNLOAD_ALLOWED_HOSTS`, `DOWNLOAD_USER_AGENT`,
 4. Final authoritative tags always come from the user-confirmed request,
    not fuzzy provider metadata.
 5. Optional approved artwork: bounded HTTP download (5 MiB), FFmpeg first-frame
-   JPEG ≤600×600, Mutagen ID3 APIC (MP3) / FLAC PICTURE; failure is nonfatal. No
-   blind image search. MP3 uses ID3v2.3; sidecar LRC is preferred to embedding
+   JPEG ≤600×600, Mutagen ID3 APIC (MP3) / FLAC PICTURE; failure is nonfatal.
+   Without (working) approved artwork, the thumbnail yt-dlp saved from the same
+   source (`--write-thumbnail`, no conversion step) is centre-cropped square,
+   ≤600×600, and embedded, recorded as `source_thumbnail`. For YouTube
+   "Official Audio"/art tracks the crop is the cover; for other videos it is a
+   frame. No blind image search. MP3 uses ID3v2.3; sidecar LRC is preferred to embedding
    unreliable SYLT conversions. Source chapter/disc/date/MusicBrainz tags are not
    inferred. Multi-disc releases can be supplied in one ordered list but do not
    retain separate disc numbering in this initial implementation.
@@ -237,13 +253,44 @@ JSON: `LIBRARY_ROOT`, `DOWNLOAD_ALLOWED_HOSTS`, `DOWNLOAD_USER_AGENT`,
    power-loss durability still depends on the host filesystem/device semantics.
 
 stdout is **JSON Lines**, including `valid`, `started`, `track_staged`, `warning`,
-`complete`, `error`. Consumers must require exit 0 **and** `complete`; intermediate
-track events are not imported files. `complete` reports request ID,
-absolute folder path, per-track filename/hash/lyrics/artwork/provider and `scan` result.
+`complete`, `error`, `summary`. Intermediate track events are not imported files.
+`complete` (one per release) reports request ID, absolute folder path, per-track
+title/filename/hash/lyrics/artwork/provider and `scan` result. An import always
+ends with exactly one `summary` line: `ok`, `added` (releases now in the library,
+with per-song `lyrics`/`artwork` and `scan`), `failed` (with `reason`/`code`) and
+`not_attempted`. Releases are imported sequentially, each under the library lock.
+Codes 65/69 (bad or unavailable source) skip to the next release; any other
+failure stops the batch. A release that was published before a later step failed
+is listed under `added` with `warning: published_check_before_retry`, never as
+failed, so agents do not re-import it. A validation failure emits `error` and
+no `summary`: nothing was downloaded.
+
+`scripts/butler.sh add <id>` runs `--validate` and, only if that succeeds, the
+import. Request ids are 1–64 characters `[a-z0-9-]` starting alphanumeric, so
+small models can use readable names and ids cannot contain `.` or `/`.
+
+**Lookup** (`--lookup`, `butler.sh lookup <id>` reading `requests/lookup-<id>.json`):
+input `{"search": [...], "urls": [...]}`, 1–10 items in total. Search texts
+follow the text rules (≤200 characters); URLs follow the source URL policy, and
+search requires `www.youtube.com` in the allowlist. Each search runs
+`yt-dlp --flat-playlist --dump-json -- ytsearch5:<text>`. The text is one argv
+element behind a fixed prefix, never a shell word or a URL. Up to 2 results per
+search from `"<Artist> - Topic"` channels (YouTube Music uploads) and each given
+URL get a metadata-only extraction (`--dump-json --ignore-no-formats-error`).
+Output is one `lookup` line with only `title`, `channel`, `duration`, a
+normalized `https://www.youtube.com/watch?v=<id>` (or the given) URL, and, when
+YouTube provides them, `artist`/`track`. Raw metadata (format URLs, which can be
+signed) is never printed. `album` is deliberately left out, so agents don't
+group separately requested songs into a fake album with wrong track numbers.
+Live/upcoming, non-video and over-3600-second results are dropped. Nothing is
+downloaded or written; errors are reported per item (`search_failed`,
+`lookup_failed`); an interrupt stops the lookup. Choosing a result and cleaning
+titles is the agent's job (see the skill). The importer never rewrites titles.
 
 | Exit | Meaning |
 |---|---|
-| 0 | validation succeeded, or audio published successfully (lyrics/scan warnings may remain) |
+| 0 | validation succeeded, or every release was published (lyrics/scan warnings may remain) |
+| other | the first failure's code below; see `summary` for what was nevertheless added |
 | 2 | argument-parser misuse |
 | 65 | invalid input/policy |
 | 69 | missing tool/dependency, unavailable provider/media, timeout |
@@ -267,8 +314,14 @@ spacing, honors 429 `Retry-After` (seconds or HTTP date) via a persistent cooldo
 file, and does not retry in a tight loop. 404, network errors, malformed responses,
 instrumental records and plain-only lyrics are **not** audio failures.
 
+If `/api/get` returns 404 (commonly because the album name of a single or upload
+is a guess), one `GET /api/search` by artist and title follows. A result is used
+only if artist and title match exactly (case-insensitive), its duration is
+within ±2 s of the downloaded file, and it has `syncedLyrics`. A YouTube upload
+with an intro/outro fails the duration rule by design, since its timing would be off.
+
 Only nonempty timestamped `syncedLyrics` is saved in UTF-8 as
-`001-Title.lrc` beside `001-Title.mp3`/`.flac`. No inaccurate fallback search,
+`001-Title.lrc` beside `001-Title.mp3`/`.flac`. No fuzzy matching,
 manual timestamp fabrication, LRCLIB publication, or lyrics upload. LRCLIB also
 supports newer formats, but this implementation deliberately uses conventional
 line-level LRC. Enabling lookups discloses track/artist/album/duration and source
@@ -355,10 +408,10 @@ Copilot or any agent that loads `SKILL.md` skills) with the supplied
 [agent skill](skills/music-butler/SKILL.md). The skill defines the permitted file
 and command operations, when to ask the user, the request schema,
 truthful reporting and backup behavior. Its only executor is
-[`scripts/butler.sh`](scripts/butler.sh), which accepts a 32-hex request id or a
+[`scripts/butler.sh`](scripts/butler.sh), which accepts a `[a-z0-9-]` request id or a
 drive name and nothing else, so no chat text reaches Docker or a shell. But **a
 skill is not a security enforcement layer**: restrict the agent's command policy
-to writing `requests/approved-*.json` and running `scripts/butler.sh`, and remember
+to writing `requests/approved-*.json`/`requests/lookup-*.json` and running `scripts/butler.sh`, and remember
 that anyone who can message the agent can ask it for imports. An unrestricted
 terminal does not become safe just because the skill says so.
 
@@ -461,7 +514,8 @@ network exposure and backup restore. The live results of one real deployment
 (imports, indexing, Tempo over a Tailscale HTTPS proxy, backups, an agent-driven
 import) are recorded in VALIDATION; they are not a claim of legal correctness.
 
-Not included: commercial catalog search, DRM/cookie support,
+Not included: catalog metadata matching (e.g. MusicBrainz), search beyond
+YouTube candidates, DRM/cookie support,
 artist discovery crawler, deduplication, robust malicious-tenant isolation,
 hard disk quotas, guaranteed album metadata matching, guaranteed lyrics, word
 karaoke timing, scheduled/off-site backups, TLS/VPN deployment, push
