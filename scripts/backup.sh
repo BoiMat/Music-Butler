@@ -45,6 +45,9 @@ repo_available() {
 database_copy() {
     if docker compose ps --status running --services 2>/dev/null | grep -qx navidrome; then
         docker compose exec -T navidrome /app/navidrome backup create --nobanner >/dev/null 2>&1
+    elif [[ ! -f "$data/navidrome.db" ]]; then
+        # Navidrome has never started here: there is no database to copy yet.
+        log "No Navidrome database at $data/navidrome.db yet; backing up the library only"
     else
         # Stopped server: the database is quiescent, so a plain copy is consistent.
         mkdir -p "$data/backup"
@@ -64,8 +67,11 @@ case "${1:-run}" in
         fi
         log 'Creating consistent Navidrome database copy'
         database_copy
-        paths=("$library" "$data/backup" "$secrets_dir" "$PWD/.env")
-        [[ -d requests ]] && paths+=("$PWD/requests")
+        # restic fails on missing paths, so add optional ones only when present.
+        paths=("$library")
+        for optional in "$data/backup" "$secrets_dir" "$PWD/.env" "$PWD/requests"; do
+            [[ -e "$optional" ]] && paths+=("$optional")
+        done
         log 'Backing up'
         restic backup --tag music-butler --one-file-system \
             --exclude "$library/.staging" --exclude "$library/.ingest.lock" \
@@ -80,13 +86,26 @@ case "${1:-run}" in
         restic snapshots
         ;;
     restore-test)
-        # Restore the latest snapshot to a temp dir and compare every audio file hash.
-        target="$(mktemp -d)"
+        # Restore the latest snapshot's music tree to a scratch dir and compare every file hash.
+        # RESTORE_TEST_DIR can point at a disk with room for a full copy of the library.
+        scratch="${RESTORE_TEST_DIR:-${TMPDIR:-/tmp}}"
+        need_kb="$(du -sk "$library/music" | cut -f1)"
+        free_kb="$(df -Pk "$scratch" | awk 'NR == 2 { print $4 }')"
+        if (( need_kb + 1048576 > free_kb )); then
+            log "Not enough space in $scratch for a restore test (${need_kb} KiB + 1 GiB headroom needed); set RESTORE_TEST_DIR" >&2
+            exit 73
+        fi
+        target="$(mktemp -d "$scratch/music-butler-restore.XXXXXX")"
         trap 'rm -rf "$target"' EXIT
-        restic restore latest --target "$target"
+        restic restore latest --target "$target" --include "$library/music"
         restored="$target$library"
-        (cd "$library/music" && find . -type f ! -name '.*' -print0 | sort -z | xargs -0 shasum -a 256) > "$target/live.sha"
-        (cd "$restored/music" && find . -type f ! -name '.*' -print0 | sort -z | xargs -0 shasum -a 256) > "$target/restored.sha"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha=(sha256sum)
+        else
+            sha=(shasum -a 256)
+        fi
+        (cd "$library/music" && find . -type f ! -name '.*' -print0 | sort -z | xargs -0 "${sha[@]}") > "$target/live.sha"
+        (cd "$restored/music" && find . -type f ! -name '.*' -print0 | sort -z | xargs -0 "${sha[@]}") > "$target/restored.sha"
         diff "$target/live.sha" "$target/restored.sha"
         log "Restore test passed: $(wc -l < "$target/live.sha" | tr -d ' ') files identical"
         ;;

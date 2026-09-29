@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Constrained, transactional authorized-audio ingestion. No shell evaluation."""
+"""Constrained, transactional audio ingestion. No shell evaluation."""
 import argparse
 import contextlib
 import datetime
@@ -69,6 +69,11 @@ def url(value, hosts, resolve=False):
     return value
 
 
+def allowed_hosts():
+    # Tolerate "a.org, b.org" in .env; empty entries never match a real hostname.
+    return {h.strip().lower() for h in os.environ.get("DOWNLOAD_ALLOWED_HOSTS", DEFAULT_HOSTS).split(",") if h.strip()}
+
+
 def validate(data, resolve=False):
     if not isinstance(data, dict) or set(data) - {"kind", "artist", "album", "format", "quality", "tracks"}:
         raise Failure("invalid_request_keys")
@@ -85,28 +90,17 @@ def validate(data, resolve=False):
     tracks = data.get("tracks")
     if not isinstance(tracks, list) or not 1 <= len(tracks) <= 100 or (out["kind"] == "song" and len(tracks) != 1):
         raise Failure("invalid_track_count")
-    hosts = set(os.environ.get("DOWNLOAD_ALLOWED_HOSTS", DEFAULT_HOSTS).split(","))
+    hosts = allowed_hosts()
     out["tracks"] = []
     seen = set()
     for track in tracks:
-        if not isinstance(track, dict) or set(track) - {"title", "url", "authorization", "license", "spotify_url", "artwork_url"}:
+        if not isinstance(track, dict) or set(track) - {"title", "url", "artwork_url"}:
             raise Failure("invalid_track_keys")
         t = {"title": text(track.get("title"), "title"),
-             "url": url(track.get("url"), hosts, resolve),
-             "authorization": text(track.get("authorization"), "authorization", 1000)}
-        if track.get("license") not in ("public-domain", "user-authorized"):
-            raise Failure("authorization_required")
-        t["license"] = track["license"]
+             "url": url(track.get("url"), hosts, resolve)}
         if t["url"] in seen:
             raise Failure("duplicate_source_url")
         seen.add(t["url"])
-        if "spotify_url" in track:
-            s = url(track["spotify_url"], {"open.spotify.com"}, resolve)
-            if not re.fullmatch(r"/track/[A-Za-z0-9]{22}", urllib.parse.urlsplit(s).path):
-                raise Failure("spotify_track_url_required")
-            if urllib.parse.urlsplit(t["url"]).hostname not in YOUTUBE_HOSTS:
-                raise Failure("spotdl_requires_explicit_youtube_pair")
-            t["spotify_url"] = s
         if "artwork_url" in track:
             t["artwork_url"] = url(track["artwork_url"], hosts, resolve)
         out["tracks"].append(t)
@@ -124,10 +118,28 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise Failure("http_redirect_refused", 69)
 
 
-def fetch(address, *, data=None, headers=None, limit=MAX_RESPONSE):
+class AllowlistRedirect(urllib.request.HTTPRedirectHandler):
+    """Artwork only: archive.org/download always redirects to an iaNNN.us.archive.org mirror."""
+    max_redirections = 3
+
+    def __init__(self, hosts):
+        super().__init__()
+        self.hosts = hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = (urllib.parse.urlsplit(newurl).hostname or "").lower()
+        if not (host in self.hosts or ("archive.org" in self.hosts and host.endswith(".archive.org"))):
+            raise Failure("http_redirect_refused", 69)
+        # Same HTTPS/port/credential/public-address policy as the approved URL.
+        url(newurl, {host}, resolve=True)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch(address, *, data=None, headers=None, limit=MAX_RESPONSE, redirect_hosts=None):
     req = urllib.request.Request(address, data=data, headers=headers or {})
     # Never leak scan credentials through ambient proxies or redirects.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    redirects = AllowlistRedirect(redirect_hosts) if redirect_hosts else NoRedirect()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirects)
     with opener.open(req, timeout=20) as response:
         body = response.read(limit + 1)
         if len(body) > limit:
@@ -164,70 +176,25 @@ def encode(source, dest, request, cwd, env):
     run(args + [str(dest)], cwd, env)
 
 
-def spotdl_config(env):
-    """Opt-in official API only; never use spotDL's default unofficial client."""
-    path = Path(os.environ.get("SPOTDL_CREDENTIALS_FILE", "/run/music-secrets/spotify.json"))
-    try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
-            raise Failure("spotdl_credentials_unavailable", 69)
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if set(data) != {"client_id", "client_secret"}:
-            raise Failure("invalid_spotdl_credentials", 69)
-        config: dict = {key: text(data[key], key, 200) for key in data}
-        config.update(load_config=True, use_official_api=True, no_cache=True,
-                      lyrics_providers=[], cookie_file=None, user_auth=False)
-        # v4.5.2 uses HOME rather than XDG_CONFIG_HOME; legacy path works on both OSes.
-        directory = Path(env["HOME"]) / ".spotdl"
-        directory.mkdir(mode=0o700, exist_ok=True)
-        target = directory / "config.json"
-        target.write_text(json.dumps(config), encoding="utf-8")
-        target.chmod(0o600)
-    except (OSError, ValueError, TypeError) as exc:
-        raise Failure("spotdl_credentials_unavailable", 69) from exc
-
-
 def download_agent():
     return text(os.environ.get("DOWNLOAD_USER_AGENT") or f"music-butler/{VERSION}", "download_user_agent")
 
 
 def acquire(track, request, work, env):
     source = work / "source.flac"
-    provider = "yt-dlp"
-    if track.get("spotify_url") and os.environ.get("ENABLE_SPOTDL", "false") == "true":
-        if shutil.which("spotdl"):
-            try:
-                spotdl_config(env)
-                run(["spotdl", "download", track["url"] + "|" + track["spotify_url"],
-                     "--use-official-api", "--config", "--no-cache", "--skip-album-art",
-                     "--format", "flac", "--output", str(source), "--threads", "1",
-                     "--yt-dlp-args", "--js-runtimes node --no-geo-bypass --no-playlist --socket-timeout 30",
-                     "--max-retries", "1", "--lyrics", "--log-level", "ERROR"], work, env)
-                if not source.is_file():
-                    raise Failure("spotdl_no_output", 69)
-                provider = "spotdl"
-            except Failure as exc:
-                if exc.code in (130, 143):
-                    raise
-                emit("warning", reason="spotdl_failed_using_same_authorized_url")
-                for item in work.iterdir():
-                    if item.is_file():
-                        item.unlink()
-        else:
-            emit("warning", reason="spotdl_not_installed_using_yt_dlp")
-    if not source.exists():
-        # Archives such as Wikimedia reject bots posing as browsers; YouTube needs yt-dlp's default.
-        agent = []
-        if urllib.parse.urlsplit(track["url"]).hostname not in YOUTUBE_HOSTS:
-            agent = ["--user-agent", download_agent()]
-        run(["yt-dlp", "--ignore-config", "--no-plugin-dirs", "--no-playlist",
-             "--no-progress", "--no-warnings", "--no-cache-dir", "--no-geo-bypass",
-             "--js-runtimes", "node", "--socket-timeout", "30", "--retries", "2", "--fragment-retries", "2",
-             "--max-filesize", "500M", "--match-filter", "!is_live & duration <? 3601",
-             "-f", "bestaudio/best", "-x", "--audio-format", "flac", *agent,
-             "-o", str(work / "source.%(ext)s"), "--", track["url"]], work, env)
+    # Archives such as Wikimedia reject bots posing as browsers; YouTube needs yt-dlp's default.
+    agent = []
+    if urllib.parse.urlsplit(track["url"]).hostname not in YOUTUBE_HOSTS:
+        agent = ["--user-agent", download_agent()]
+    run(["yt-dlp", "--ignore-config", "--no-plugin-dirs", "--no-playlist",
+         "--no-progress", "--no-warnings", "--no-cache-dir", "--no-geo-bypass",
+         "--js-runtimes", "node", "--socket-timeout", "30", "--retries", "2", "--fragment-retries", "2",
+         "--max-filesize", "500M", "--match-filter", "!is_live & duration <? 3601",
+         "-f", "bestaudio/best", "-x", "--audio-format", "flac", *agent,
+         "-o", str(work / "source.%(ext)s"), "--", track["url"]], work, env)
     if not source.is_file() or source.is_symlink():
         raise Failure("no_audio_output", 69)
-    return source, provider
+    return source, "yt-dlp"
 
 
 def tag_audio(path, request, track, number, total, cover):
@@ -266,7 +233,8 @@ def artwork(track, work, env):
         return None
     try:
         raw = work / "cover.input"
-        raw.write_bytes(fetch(track["artwork_url"], headers={"User-Agent": download_agent()}, limit=5242880))
+        raw.write_bytes(fetch(track["artwork_url"], headers={"User-Agent": download_agent()}, limit=5242880,
+                              redirect_hosts=allowed_hosts()))
         jpg = work / "cover.jpg"
         run(["ffmpeg", "-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file,pipe",
              "-f", "image2", "-pattern_type", "none", "-i", str(raw),

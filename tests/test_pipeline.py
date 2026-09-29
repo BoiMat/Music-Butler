@@ -17,6 +17,7 @@ import time
 import unittest
 import urllib.error
 import urllib.parse
+import urllib.request
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,8 +29,7 @@ spec.loader.exec_module(b)
 
 def request():
     return {"kind": "song", "artist": "Test Artist", "album": "Test Album", "format": "mp3", "quality": "192",
-            "tracks": [{"title": "Test Tone", "url": "https://archive.org/download/test/tone.wav",
-                        "license": "user-authorized", "authorization": "Generated test fixture; no remote download."}]}
+            "tracks": [{"title": "Test Tone", "url": "https://archive.org/download/test/tone.wav"}]}
 
 
 class Contract(unittest.TestCase):
@@ -53,10 +53,6 @@ class Contract(unittest.TestCase):
             r["tracks"][0]["url"] = address
             with self.subTest(address=address), self.assertRaises((b.Failure, ValueError)):
                 b.validate(r)
-        r = request()
-        del r["tracks"][0]["authorization"]
-        with self.assertRaises(b.Failure):
-            b.validate(r)
 
     def test_private_dns(self):
         with patch.object(b.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))]):
@@ -108,6 +104,30 @@ class Contract(unittest.TestCase):
     def test_no_redirect(self):
         with self.assertRaises(b.Failure):
             b.NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.test")
+
+    def test_allowed_hosts_tolerates_spaces(self):
+        with patch.dict(os.environ, {"DOWNLOAD_ALLOWED_HOSTS": "archive.org, YouTube.com ,"}):
+            self.assertEqual(b.allowed_hosts(), {"archive.org", "youtube.com"})
+            r = b.validate({**request(), "tracks": [{"title": "YT", "url": "https://youtube.com/watch?v=x"}]})
+            self.assertEqual(len(r["tracks"]), 1)
+
+    def test_artwork_redirect_policy(self):
+        handler = b.AllowlistRedirect({"archive.org", "upload.wikimedia.org"})
+        req = urllib.request.Request("https://archive.org/download/item/cover.jpg")
+        public = [(2, 1, 6, "", ("207.241.224.2", 443))]
+        with patch.object(b.socket, "getaddrinfo", return_value=public):
+            new = handler.redirect_request(req, None, 302, "Found", {}, "https://ia800.us.archive.org/1/items/item/cover.jpg")
+            self.assertEqual(new.full_url, "https://ia800.us.archive.org/1/items/item/cover.jpg")
+            for target in ["https://evil.test/cover.jpg", "http://ia800.us.archive.org/cover.jpg",
+                           "https://ia800.us.archive.org:8443/cover.jpg", "https://archive.org.evil.test/x"]:
+                with self.subTest(target=target), self.assertRaises(b.Failure):
+                    handler.redirect_request(req, None, 302, "Found", {}, target)
+        with patch.object(b.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("10.0.0.5", 443))]):
+            with self.assertRaisesRegex(b.Failure, "non_public"):
+                handler.redirect_request(req, None, 302, "Found", {}, "https://ia800.us.archive.org/cover.jpg")
+        without_archive = b.AllowlistRedirect({"upload.wikimedia.org"})
+        with self.assertRaises(b.Failure):
+            without_archive.redirect_request(req, None, 302, "Found", {}, "https://ia800.us.archive.org/cover.jpg")
 
 
 class NetworkMocks(unittest.TestCase):
@@ -163,51 +183,33 @@ class NetworkMocks(unittest.TestCase):
             self.assertIn("--ignore-config", argv)
             self.assertEqual(argv[argv.index("--user-agent") + 1], f"music-butler/{b.VERSION}")
             (work / "source.flac").write_bytes(b"fixture")
-        with patch.object(b, "run", side_effect=fake_run):
+        # The default agent is asserted, so ignore any DOWNLOAD_USER_AGENT in the tester's shell.
+        with patch.dict(os.environ), patch.object(b, "run", side_effect=fake_run):
+            os.environ.pop("DOWNLOAD_USER_AGENT", None)
             _, provider = b.acquire(r["tracks"][0], r, self.root, {})
             self.assertEqual(provider, "yt-dlp")
 
-    def test_real_provider_parsers_and_spotdl_fallback(self):
+    def test_real_ytdlp_parser_accepts_flags(self):
         import yt_dlp
-        from spotdl.utils.arguments import create_parser
-        r = request()
-        r["tracks"][0].update(url="https://www.youtube.com/watch?v=fixture1234",
-                              spotify_url="https://open.spotify.com/track/" + "a" * 22)
-        r = b.validate(r)
-        home = self.root / "home"
-        home.mkdir()
+        r = b.validate({**request(), "tracks": [
+            {"title": "YT", "url": "https://www.youtube.com/watch?v=fixture1234"}]})
         work = self.root / "work"
         work.mkdir()
-        secret = self.root / "spotify.json"
-        secret.write_text(json.dumps({"client_id": "test-only", "client_secret": "test-only"}))
-        secret.chmod(0o600)
-        calls = []
         def fake_run(argv, cwd, env):
-            calls.append(argv)
-            if argv[0] == "spotdl":
-                args = create_parser().parse_args(argv[1:])
-                self.assertTrue(args.use_official_api)
-                self.assertEqual(args.lyrics_providers, [])
-                raise b.Failure("simulated_spotdl_unavailable", 69)
             yt_dlp.parse_options(argv[1:])
             self.assertNotIn("--user-agent", argv)  # YouTube keeps yt-dlp's default.
             self.assertEqual(argv[-1], r["tracks"][0]["url"])
             (cwd / "source.flac").write_bytes(b"test fixture")
-        with patch.dict(os.environ, {"ENABLE_SPOTDL": "true", "SPOTDL_CREDENTIALS_FILE": str(secret)}), patch.object(b, "run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
-            _, provider = b.acquire(r["tracks"][0], r, work, {"HOME": str(home)})
+        with patch.object(b, "run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
+            _, provider = b.acquire(r["tracks"][0], r, work, {})
         self.assertEqual(provider, "yt-dlp")
-        self.assertEqual([a[0] for a in calls], ["spotdl", "yt-dlp"])
-        config = json.loads((home / ".spotdl/config.json").read_text())
-        self.assertTrue(config["use_official_api"])
-        self.assertEqual(config["client_id"], "test-only")
-        self.assertIsNone(config["cookie_file"])
 
     def test_optional_features_never_swallow_cancellation(self):
         secret = self.root / "password"
         secret.write_text("test-only")
         secret.chmod(0o600)
         env = {"LRCLIB_USER_AGENT": "offline-test", "NAVIDROME_URL": "http://navidrome:4533",
-               "NAVIDROME_USER": "test", "NAVIDROME_PASSWORD_FILE": str(secret), "ENABLE_SPOTDL": "true"}
+               "NAVIDROME_USER": "test", "NAVIDROME_PASSWORD_FILE": str(secret)}
         with patch.dict(os.environ, env), patch.object(b, "fetch", side_effect=b.Failure("interrupted", 143)):
             for operation in [lambda: b.scan(),
                               lambda: b.artwork({"artwork_url": "https://archive.org/test"}, self.root, {}),
@@ -215,20 +217,10 @@ class NetworkMocks(unittest.TestCase):
                 with self.assertRaises(b.Failure) as cm:
                     operation()
                 self.assertEqual(cm.exception.code, 143)
-            track = {**request()["tracks"][0], "spotify_url": "https://open.spotify.com/track/" + "a" * 22}
-            with patch.object(b, "spotdl_config"), patch.object(b, "run", side_effect=b.Failure("interrupted", 143)) as run:
+            with patch.object(b, "run", side_effect=b.Failure("interrupted", 143)) as run:
                 with self.assertRaises(b.Failure):
-                    b.acquire(track, request(), self.root, {})
-                self.assertEqual(run.call_count, 1)  # Never fall back after cancellation.
-
-    def test_no_spotdl_credentials_never_uses_default_client(self):
-        r = b.validate(request())
-        r["tracks"][0]["spotify_url"] = "https://open.spotify.com/track/" + "a" * 22
-        def fake_run(argv, cwd, env):
-            self.assertEqual(argv[0], "yt-dlp")
-            (cwd / "source.flac").write_bytes(b"fixture")
-        with patch.dict(os.environ, {"ENABLE_SPOTDL": "true", "SPOTDL_CREDENTIALS_FILE": str(self.root / "missing")}), patch.object(b, "run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
-            b.acquire(r["tracks"][0], r, self.root, {})
+                    b.acquire(request()["tracks"][0], request(), self.root, {})
+                self.assertEqual(run.call_count, 1)  # Cancellation is never retried.
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required for real encoder tests")

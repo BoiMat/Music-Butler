@@ -6,10 +6,8 @@
   "quality": "192",
   "tracks": [
     {
-      "title": "Your authorized track",
-      "url": "https://archive.org/download/REPLACE_WITH_VERIFIED_ITEM/REPLACE_WITH_AUDIO_FILE.flac",
-      "license": "user-authorized",
-      "authorization": "REPLACE with the user's explicit permission, source license evidence and date. This example is not authorization."
+      "title": "Your track",
+      "url": "https://archive.org/download/REPLACE_WITH_VERIFIED_ITEM/REPLACE_WITH_AUDIO_FILE.flac"
     }
   ]
 }

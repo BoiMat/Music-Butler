@@ -1,35 +1,30 @@
 # Music Butler Stack — architecture and deployment blueprint
 
-## Scope, trust and deliberately conservative defaults
+## Scope and deliberately conservative defaults
 
 This bundle gives one household a private library, not an entitlement to a
-commercial catalog. The operator supplies legally downloadable source URLs and
-accurate metadata; the tool records the asserted authorization. It cannot verify
-copyright ownership. Public-domain **compositions** do not necessarily imply
-public-domain **recordings**. Check jurisdiction, source terms, performers'
-rights, artwork and lyrics independently. Do not circumvent paywalls, DRM,
-access controls, region restrictions, or authentication. No cookies, browser
-credential extraction, user impersonation, or premium-audio ripping is provided.
+commercial catalog. The operator (or their agent) supplies source URLs and
+accurate metadata. Do not circumvent paywalls, DRM, access controls, region
+restrictions, or authentication. No cookies, browser credential extraction,
+user impersonation, or premium-audio ripping is provided.
 
 A request that only says “get this artist/album” starts a confirmation and source
-selection conversation in Hermes. It does **not** start unrestricted searching
-and downloading. This sacrifices automatic catalog matching to avoid importing
-an unauthorized or wrong recording. Each album track needs an explicitly
+selection conversation with the agent. It does **not** start unrestricted
+searching and downloading. This sacrifices automatic catalog matching to avoid
+importing the wrong recording. Each album track needs an explicitly
 approved URL; artist-wide requests and remote playlist expansion are unsupported.
 
 ### Architecture
 
 ```text
 User's existing chat channel
-        │  request / rights / exact release confirmation
-Existing Hermes Agent (recommended; NOT bundled by default)
+        │  request / exact release confirmation
+Existing agent (Hermes, local Ollama, or any SKILL.md-aware agent)
         │  fixed executor, bounded JSON stdin; no model text as shell
         ▼
 scripts/download_music.sh → music_butler.py
         │  one library-wide advisory lock; clean tool HOME/environment
-        ├─ yt-dlp (default, explicitly approved source only)
-        ├─ optional spotDL (official Spotify API metadata + explicit audio URL)
-        │      └─ failure → yt-dlp, SAME approved URL, never a new search
+        ├─ yt-dlp (explicitly approved source only)
         ├─ FFmpeg → MP3 / FLAC; Mutagen → authoritative tags / JPEG cover
         ├─ LRCLIB GET /api/get → synchronized same-basename .lrc, if available
         └─ private sibling staging → fsync → atomic whole-release directory rename
@@ -65,10 +60,11 @@ The tooling image uses published `python:3.12-slim-bookworm` and
 `node:24-bookworm-slim` (only the Node binary is copied); Python minor / Node major
 tracks are supported build bases. Node is passed explicitly to yt-dlp for modern
 YouTube JavaScript support [Y1]. No runtime auto-update/download script is used.
-`requirements.in` fixes yt-dlp, Mutagen and spotDL versions. `requirements.lock`
+`requirements.in` fixes yt-dlp and Mutagen versions. `requirements.lock`
 contains exact **transitive** versions and package hashes, resolved for Python
-3.12/Linux. Rebuild via `pip --require-hashes`; updating a downloader requires an
-explicit reviewed lock refresh and tests, since upstream sites change often.
+3.12/Linux. Rebuild via `pip install -r requirements.lock`. Upgrading a
+downloader requires an explicit reviewed lock refresh and tests, since upstream
+sites change often.
 
 ```sh
 uv pip compile requirements.in --python-version 3.12 --python-platform linux \
@@ -77,14 +73,9 @@ uv pip compile requirements.in --python-version 3.12 --python-platform linux \
 
 Compromises: Debian security packages and major/minor base tags intentionally
 float; image builds are **not byte-for-byte reproducible**. For that, record
-image digests and use a maintained Debian snapshot policy. spotDL brings a large
-optional dependency graph, including web/unofficial-client libraries: they are
-installed, but no web service or unofficial Spotify client is invoked by the
-bundle. spotDL 4.5.2 defaults to an unofficial client, so this implementation
-**forces `--use-official-api` and requires operator-supplied credentials** [S2].
-It does not use upstream bundled client secrets. Review dependencies regularly
-with your chosen scanner; passing tests is not a vulnerability audit. The
-orchestration code is MIT for easy reuse; each container/component and all
+image digests and use a maintained Debian snapshot policy. Review dependencies
+regularly with your chosen scanner; passing tests is not a vulnerability audit.
+The orchestration code is MIT for easy reuse; each container/component and all
 imported media retain their separate upstream licenses.
 
 ## Deployment and storage / UID-GID plan
@@ -159,14 +150,16 @@ This is a **trusted single-operator executor**, not a public upload/download API
   are ignored; child HOME/XDG state is temporary, and scan/model secrets are not
   inherited by media subprocesses.
 - **Important SSRF limit:** URL/DNS preflight is defense-in-depth, not an egress
-  sandbox. yt-dlp/spotDL can follow provider redirects and CDN manifests, and DNS
+  sandbox. yt-dlp can follow provider redirects and CDN manifests, and DNS
   can rebind. Compose's bridge is not a firewall. For hostile users/providers,
   enforce destination/IP restrictions with a managed egress proxy/firewall or
   separate VM; deny RFC1918, loopback, link-local/cloud metadata and host routes,
   apart from the intended Navidrome connection. Do not claim the application
   allowlist alone blocks every SSRF path.
-- The helper's artwork/LRCLIB/scan HTTP client refuses redirects and has bounded
-  response size and timeout. FFmpeg normalization pins input demuxers and limits
+- The helper's LRCLIB/scan HTTP client refuses redirects; the artwork client
+  follows at most 3, only to allowlisted hosts (plus `*.archive.org` download
+  mirrors when `archive.org` is allowed), each re-checked with the HTTPS/port/
+  credential/public-DNS policy. All have bounded response size and timeout. FFmpeg normalization pins input demuxers and limits
   protocols; media parsers still process untrusted bytes. Keep them patched.
 - Advisory lock protects cooperating writers, not a malicious same-UID process.
   A compromised downloader can damage its writable library; Navidrome cannot.
@@ -180,7 +173,7 @@ Entrypoint: executable `scripts/download_music.sh [--validate]`, reads one UTF-8
 JSON document from **stdin** (maximum 256 KiB). It uses strict Bash and a Python
 3.12 helper for safe JSON parsing, cross-platform POSIX `flock`, HTTP, Mutagen,
 process groups and atomic directory operations rather than brittle shell JSON
-parsing. Runtime tools: `python3`, `ffmpeg`, `yt-dlp`, Mutagen; optional spotDL;
+parsing. Runtime tools: `python3`, `ffmpeg`, `yt-dlp`, Mutagen;
 Node for yt-dlp's supported JS challenges. A local installation must provision
 these in a trusted PATH; `.env` is Compose configuration, not automatically
 loaded by the script.
@@ -196,24 +189,21 @@ See [`config/request.example.json`](config/request.example.json). Full schema:
 | `tracks` | array; order becomes `tracknumber/total` |
 | track `title` | required, same text constraints |
 | track `url` | exact allowlisted HTTPS audio/video URL, ≤2048 characters |
-| track `license` | `public-domain` or `user-authorized` |
-| track `authorization` | required evidence/permission note, 1–1000 characters |
-| track `artwork_url` | optional authorized image URL, same source URL policy |
-| track `spotify_url` | optional `https://open.spotify.com/track/<22 alphanumeric ID>`; metadata only; requires an explicit YouTube audio URL |
+| track `artwork_url` | optional image URL, same source URL policy |
 
 Unknown keys, duplicate source URLs and wrong types are rejected. `--validate`
 is offline schema/policy validation; it does **not** check download availability,
-rights, network reachability or dependencies. Normal execution does DNS/dependency
+network reachability or dependencies. Normal execution does DNS/dependency
 preflight too. Environment knobs are configured by the operator, not request
-JSON: `LIBRARY_ROOT`, `DOWNLOAD_ALLOWED_HOSTS`, `ENABLE_SPOTDL`,
-`SPOTDL_CREDENTIALS_FILE`, `LRCLIB_USER_AGENT`, `NAVIDROME_URL`,
-`NAVIDROME_USER`, `NAVIDROME_PASSWORD_FILE`.
+JSON: `LIBRARY_ROOT`, `DOWNLOAD_ALLOWED_HOSTS`, `DOWNLOAD_USER_AGENT`,
+`LRCLIB_USER_AGENT`, `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASSWORD_FILE`.
 
 ### Transaction and normalization
 
-1. Validate request, preflight tools/DNS, ensure safe local managed directories,
-   acquire nonblocking per-library `.ingest.lock`. A busy caller exits 75. Locks
-   release on process exit; **never delete the lock file to unlock**.
+1. Validate request and preflight source DNS, ensure safe local managed
+   directories, acquire nonblocking per-library `.ingest.lock` (a busy caller
+   exits 75), then check free space and tools. Locks release on process exit;
+   **never delete the lock file to unlock**.
 2. Allocate a UUID job directory in `.staging` on the destination filesystem.
    Require at least 2 GiB free initially. Provider attempts have a 15-minute
    timeout with bounded network retries; child process groups are killed on
@@ -226,11 +216,8 @@ JSON: `LIBRARY_ROOT`, `DOWNLOAD_ALLOWED_HOSTS`, `ENABLE_SPOTDL`,
    albumartist, album and track number/total. Supports 1–3600 second tracks;
    long-form mixes/audiobooks are intentionally not supported. Re-encoding lossy
    audio loses quality; FLAC never creates true lossless audio from a lossy source.
-4. Optional spotDL uses the documented `YouTubeURL|SpotifyTrackURL` pairing [S1],
-   single-threaded with lyrics/album-art scraping disabled. Explicit official
-   API only and fresh private config; failure falls back to **the same URL** via
-   yt-dlp. No automatic Spotify-album search fallback. Final authoritative tags
-   always come from the user-confirmed request, not fuzzy provider metadata.
+4. Final authoritative tags always come from the user-confirmed request,
+   not fuzzy provider metadata.
 5. Optional approved artwork: bounded HTTP download (5 MiB), FFmpeg first-frame
    JPEG ≤600×600, Mutagen ID3 APIC (MP3) / FLAC PICTURE; failure is nonfatal. No
    blind image search. MP3 uses ID3v2.3; sidecar LRC is preferred to embedding
@@ -238,13 +225,13 @@ JSON: `LIBRARY_ROOT`, `DOWNLOAD_ALLOWED_HOSTS`, `ENABLE_SPOTDL`,
    inferred. Multi-disc releases can be supplied in one ordered list but do not
    retain separate disc numbering in this initial implementation.
 6. LRCLIB lookup (below), hash finished tracks, write `provenance.json` with
-   source, rights assertion, request metadata, provider and per-track outcomes.
+   source, request metadata, provider and per-track outcomes.
    `fsync` completed files, set release directory 0750 and rename **the entire
    release** once into `music/Artist--Album--UUID`. UUIDs avoid collisions even
    when different titles slugify identically. There is no overwrite/update API;
    repeated requests produce separate folders, not idempotent deduplication.
 7. Request scan, record a private job receipt and emit final `complete` JSON.
-   If an album track fails before publication, publish **none** of the album.
+   If any album track fails before publication, publish **none** of the album.
    Cleanup traps remove staging on normal errors/TERM/INT. A power loss/SIGKILL
    can leave an orphan; recovery below. Rename gives atomic visibility, but
    power-loss durability still depends on the host filesystem/device semantics.
@@ -361,25 +348,12 @@ Optional immediate scan setup (operator only):
   This is an operator action, never a command handed to Hermes. A routine restart
   is unnecessary; no unverified restart-as-scan claim is used.
 
-### Optional spotDL secrets
-
-Leave `ENABLE_SPOTDL=false` unless needed. Register your own Spotify application
-using its official developer process [S3], and create `secrets/spotify.json`
-with exactly `client_id` and `client_secret` string keys, mode 0600/service owner.
-No sample credentials or upstream embedded secrets are included. Set
-`ENABLE_SPOTDL=true`; `SPOTDL_CREDENTIALS_FILE` defaults to that mounted file.
-The helper constructs a fresh private spotDL config and forces the official API,
-then deletes temporary state with the stage. Missing/invalid credentials or API
-access restrictions fall back to yt-dlp for the already approved source. Spotify
-API availability/terms can change; Spotify metadata is not audio authorization.
-Do not provide token/cookie files or enable unofficial alternatives.
-
-## Hermes boundary
+## Agent boundary
 
 Recommended: **use your existing agent** (Hermes [H1], Claude Code, Codex,
 Copilot or any agent that loads `SKILL.md` skills) with the supplied
 [agent skill](skills/music-butler/SKILL.md). The skill defines the permitted file
-and command operations, rights checks, when to ask the user, the request schema,
+and command operations, when to ask the user, the request schema,
 truthful reporting and backup behavior. Its only executor is
 [`scripts/butler.sh`](scripts/butler.sh), which accepts a 32-hex request id or a
 drive name and nothing else, so no chat text reaches Docker or a shell. But **a
@@ -420,8 +394,8 @@ auto-installed gateway, Telegram credentials or unverified config keys are shipp
 ## Logging, recovery and backups
 
 Each completed/failed job writes a private `logs/<request-id>.json` receipt;
-completed releases also contain `provenance.json`. Receipts include authorization
-notes, source URLs, file hashes and outcomes. They are **sensitive personal
+completed releases also contain `provenance.json`. Receipts include source
+URLs, file hashes and outcomes. They are **sensitive personal
 listening/provenance data**, not public telemetry. Keep request files out of Git;
 remove/retain them according to policy. Provider raw stdout/stderr is deliberately
 not exposed (it may contain signed URLs); a media-tool failure reason can be
@@ -487,7 +461,7 @@ network exposure and backup restore. The live results of one real deployment
 (imports, indexing, Tempo over a Tailscale HTTPS proxy, backups, an agent-driven
 import) are recorded in VALIDATION; they are not a claim of legal correctness.
 
-Not included: Spotify streaming/authentication replacement, DRM/cookie support,
+Not included: commercial catalog search, DRM/cookie support,
 artist discovery crawler, deduplication, robust malicious-tenant isolation,
 hard disk quotas, guaranteed album metadata matching, guaranteed lyrics, word
 karaoke timing, scheduled/off-site backups, TLS/VPN deployment, push
@@ -509,9 +483,6 @@ never silently replace a track to manufacture success.
 - **[O3]** OpenSubsonic lyrics: https://opensubsonic.netlify.app/docs/extensions/songlyrics/ and https://opensubsonic.netlify.app/docs/endpoints/getlyricsbysongid/
 - **[L1]** LRCLIB API and client identification/rate limits: https://lrclib.net/docs
 - **[Y1]** yt-dlp options, dependencies, metadata, output: https://github.com/yt-dlp/yt-dlp/blob/master/README.md
-- **[S1]** spotDL usage and explicit source pairing: https://spotdl.readthedocs.io/en/latest/usage/ and https://github.com/spotDL/spotify-downloader/blob/v4.5.2/docs/usage.md
-- **[S2]** spotDL official/unofficial API selection and config: https://github.com/spotDL/spotify-downloader/blob/v4.5.2/spotdl/utils/spotify.py and https://github.com/spotDL/spotify-downloader/blob/v4.5.2/spotdl/utils/config.py
-- **[S3]** Spotify Web API/client credentials: https://developer.spotify.com/documentation/web-api/tutorials/client-credentials-flow
 - **[F1]** FFmpeg CLI: https://ffmpeg.org/ffmpeg.html
 - **[M1]** Mutagen ID3: https://mutagen.readthedocs.io/en/latest/user/id3.html and FLAC: https://mutagen.readthedocs.io/en/latest/api/flac.html
 - **[T1]** Tempo: https://github.com/CappielloAntonio/tempo and player implementation: https://github.com/CappielloAntonio/tempo/blob/main/app/src/main/java/com/cappielloantonio/tempo/ui/fragment/PlayerLyricsFragment.java

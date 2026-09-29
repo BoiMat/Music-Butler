@@ -13,8 +13,8 @@ Usage: scripts/butler.sh <command>
   validate <id>    check requests/approved-<id>.json offline (no download)
   import <id>      import requests/approved-<id>.json into the library
   status           Navidrome health and library contents
-  drives           list mounted external drives (macOS)
-  backup [drive]   encrypted backup to /Volumes/<drive>/music-butler-restic,
+  drives           list mounted external drives (macOS /Volumes, Linux /media)
+  backup [drive]   encrypted backup to <drive mount>/music-butler-restic,
                    or to BACKUP_REPOSITORY from .env when no drive is given
 <id> is 32 lowercase hex characters.
 EOF
@@ -28,13 +28,38 @@ request_file() {
     printf '%s' "$file"
 }
 
-drives() {
-    local volume
-    for volume in /Volumes/*; do
-        # The boot volume appears in /Volumes as a symlink to /.
-        [[ -d "$volume" && ! -L "$volume" ]] && printf '%s\n' "${volume#/Volumes/}"
-    done
+# Where removable drives are mounted: macOS /Volumes; Linux desktop automounts
+# (udisks2 uses /run/media/$USER or /media/$USER), then plain /media/<name>.
+mount_roots() {
+    if [[ "$(uname -s)" == Darwin ]]; then
+        printf '%s\n' /Volumes
+    else
+        printf '%s\n' "/run/media/${USER:-$(id -un)}" "/media/${USER:-$(id -un)}" /media
+    fi
+}
+
+# Prints "name<TAB>mount path" for each mounted drive; first root wins on duplicates.
+drive_mounts() {
+    local root volume name seen=$'\n'
+    while IFS= read -r root; do
+        [[ -d "$root" ]] || continue
+        for volume in "$root"/*; do
+            # The macOS boot volume appears in /Volumes as a symlink to /.
+            [[ -d "$volume" && ! -L "$volume" ]] || continue
+            name="${volume##*/}"
+            # /media/<user> is a directory of mounts, not a drive itself.
+            [[ "$volume" == "/media/${USER:-}" ]] && continue
+            [[ "$(uname -s)" == Darwin ]] || mountpoint -q -- "$volume" 2>/dev/null || continue
+            [[ "$seen" == *$'\n'"$name"$'\n'* ]] && continue
+            seen+="$name"$'\n'
+            printf '%s\t%s\n' "$name" "$volume"
+        done
+    done < <(mount_roots)
     return 0
+}
+
+drives() {
+    drive_mounts | cut -f1
 }
 
 compose=(docker compose --progress quiet)
@@ -63,8 +88,9 @@ case "${1:-}" in
         if [[ -n "${2:-}" ]]; then
             drive="$2"
             [[ "$drive" =~ ^[A-Za-z0-9][A-Za-z0-9._\ -]{0,63}$ ]] || { echo 'invalid drive name' >&2; exit 64; }
-            drives | grep -qxF -- "$drive" || { echo "drive not mounted: $drive" >&2; exit 75; }
-            export RESTIC_REPOSITORY="/Volumes/$drive/music-butler-restic"
+            mount_path="$(drive_mounts | awk -F '\t' -v d="$drive" '$1 == d && !found { print $2; found = 1 }')"
+            [[ -n "$mount_path" ]] || { echo "drive not mounted: $drive" >&2; exit 75; }
+            export RESTIC_REPOSITORY="$mount_path/music-butler-restic"
             [[ -f "$RESTIC_REPOSITORY/config" ]] || scripts/backup.sh init
         fi
         scripts/backup.sh run

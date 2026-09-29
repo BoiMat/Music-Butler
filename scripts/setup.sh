@@ -35,6 +35,8 @@ for name, service in config['services'].items():
         path.mkdir(parents=True, exist_ok=True, mode=0o750)
         if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
             raise SystemExit(f'Fix storage ownership before starting: {path}')
+requests_dir = pathlib.Path('requests')
+requests_dir.mkdir(mode=0o750, exist_ok=True)
 print('Configuration valid; storage provisioned; .env contains no bundled credentials.')
 PY
 if [[ "${1:-}" == '--start' ]]; then

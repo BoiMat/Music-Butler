@@ -1,9 +1,8 @@
 # Music Butler Stack
 
 A private, self-hosted music library: **Navidrome → Tempo (Android)**, with an
-optional, constrained download tool for your **existing Hermes Agent**.
-Only import audio you are authorized to download, or verified public-domain
-recordings. A Spotify subscription or a search result is **not** authorization.
+optional, constrained download tool for your **existing Hermes Agent** (or a
+local Ollama model, see [`scripts/agent.py`](scripts/agent.py)).
 
 ## Start
 
@@ -33,20 +32,22 @@ console first). Create a **non-admin** playback account for Tempo.
 docker compose --profile tools build downloader
 mkdir -p requests
 cp config/request.example.json requests/approved.json
-# Edit every placeholder: accurate metadata, exact authorized audio URLs,
-# per-track permission/license evidence. Never execute the example unchanged.
+# Edit every placeholder: accurate metadata and exact audio URLs.
+# Never execute the example unchanged.
 docker compose run --rm -T downloader --validate < requests/approved.json
 docker compose run --rm -T downloader < requests/approved.json
 ```
 
-For an album, set `kind` to `album` and list **each authorized track in order**.
-No artist-wide crawling, automatic search-to-download, playlist expansion, or
-Spotify audio extraction. MP3 quality is `128|192|256|320`; FLAC compression is
-`0`–`8` (strings). Lossy-to-FLAC conversion cannot restore quality.
+For an album, set `kind` to `album` and list **each track in order**.
+No artist-wide crawling or automatic search-to-download. MP3 quality is
+`128|192|256|320`; FLAC compression is `0`–`8` (strings). Lossy-to-FLAC
+conversion cannot restore quality.
 
 Set `LRCLIB_USER_AGENT` in `.env` to your application name/version and **real
 contact email or project URL** to enable synchronized lyrics. Blank disables
-lookups. Optional `artwork_url` per track supplies an authorized image. Missing
+lookups. Optional `artwork_url` per track supplies an authorized image. It
+follows the source URL policy; redirects are followed only to allowlisted hosts
+(and, when `archive.org` is allowed, its `*.archive.org` download mirrors). Missing
 artwork or synced lyrics does not prevent import.
 
 Success emits a JSON `complete` event with files, hashes, lyrics/artwork status
@@ -54,6 +55,37 @@ and scan status. The **whole album** appears atomically in the library.
 Navidrome's watcher plus a one-minute schedule arranges discovery without
 credentials. Optional admin `startScan` is described in the blueprint; a scan
 request is **not** a guarantee that the library is already indexed.
+
+## Local Ollama agent
+
+[`scripts/agent.py`](scripts/agent.py) is a small, standard-library-only chat
+agent that runs a local [Ollama](https://ollama.com) model on your own machine
+(16 GB is plenty for a 7–8 B model). It loads the
+[agent skill](skills/music-butler/SKILL.md) as its system prompt, writes request
+files through a structured tool and calls the same fixed `scripts/butler.sh`
+commands, so nothing new reaches Docker or a shell.
+
+```sh
+ollama pull qwen2.5:7b          # or any small model you prefer
+ollama serve                    # if not already running
+python3 scripts/agent.py        # from this repository
+```
+
+The agent has **no web access**, so you supply the source. For example: "add
+Scott Joplin, The Entertainer, single 'The Entertainer', from
+https://upload.wikimedia.org/.../The_Entertainer.ogg". It writes
+`requests/approved-<id>.json`, validates it, and imports it. If you don't give
+a URL, it asks for one. Typing `write-request` lets you paste a request JSON
+yourself and have the agent validate and import it.
+
+Configuration is environment: `OLLAMA_MODEL` (default `qwen2.5:7b`),
+`OLLAMA_BASE_URL` (default `http://localhost:11434`), `BUTLER_TIMEOUT`
+seconds (default `3600`) for Ollama replies and the short `validate`/`status`/`drives`
+commands. Imports and backups have no agent-side timeout because the importer
+limits each download/encode step itself. Ctrl+C sends SIGTERM to the running
+`butler.sh` and its `docker compose` client; check `status` before retrying an
+import. The agent still needs Docker/Compose and the same
+host prerequisites as the manual import above.
 
 ## AI agent skill and Tempo
 
@@ -93,6 +125,7 @@ Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
 ├── docker/Dockerfile
 ├── scripts/
 │   ├── butler.sh                    # fixed agent entry point
+│   ├── agent.py                     # local Ollama chat agent
 │   ├── backup.sh                    # encrypted restic backups
 │   ├── setup.sh
 │   ├── validate.sh
@@ -101,6 +134,7 @@ Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
 ├── tests/
 │   ├── test_pipeline.py
 │   ├── test_config.py
+│   ├── test_agent.py
 │   └── container_smoke.py
 ├── docs/VALIDATION.md
 └── storage/                         # ignored, created at setup
@@ -120,39 +154,66 @@ It keeps 7 daily, 4 weekly and 12 monthly snapshots and verifies a sample of
 the repository after each run. If `BACKUP_REPOSITORY` points at an unmounted
 drive, the run is skipped.
 
+The encryption password comes from `RESTIC_PASSWORD_FILE` (or
+`RESTIC_PASSWORD_COMMAND`) if set, otherwise from the macOS Keychain.
+
+macOS:
+
 ```sh
 brew install restic
 security add-generic-password -a music-butler -s music-butler-restic \
   -l 'Music Butler restic backup' -T /usr/bin/security -w "$(openssl rand -base64 32)"
+```
+
+Linux:
+
+```sh
+sudo apt install restic          # or your distribution's package
+mkdir -p ~/.config/music-butler
+(umask 077; openssl rand -base64 32 > ~/.config/music-butler/restic-password)
+export RESTIC_PASSWORD_FILE=~/.config/music-butler/restic-password   # e.g. in ~/.profile
+```
+
+Then, on either system:
+
+```sh
 # Set BACKUP_REPOSITORY in .env, then:
 ./scripts/backup.sh init
 ./scripts/backup.sh            # back up now
 ./scripts/backup.sh restore-test
 ```
 
-**Copy the password into a password manager**
-(`security find-generic-password -a music-butler -s music-butler-restic -w`).
-Without it the backup cannot be decrypted, so losing the Mac would also lose the backup.
-On Linux, set `RESTIC_PASSWORD_FILE` instead of using the Keychain.
+**Copy the password into a password manager** (macOS:
+`security find-generic-password -a music-butler -s music-butler-restic -w`;
+Linux: the password file). Without it the backup cannot be decrypted, so losing
+the machine would also lose the backup.
 
-To restore: `restic restore latest --target /tmp/restore`, copy the library and
-`.env`/`secrets` back, then with Navidrome stopped run
-`docker compose run --rm navidrome /app/navidrome backup restore --backup-file /data/backup/<file>.db`.
+`restore-test` restores the latest snapshot's `music/` tree and compares every
+file hash with the live library. It needs free space about the size of the
+library in `$TMPDIR` (or in `RESTORE_TEST_DIR` if set) and refuses to start
+without it. `scripts/butler.sh drives` / `backup <drive>` find USB drives under
+`/Volumes` on macOS and `/run/media/$USER`, `/media/$USER` or `/media` on Linux.
+
+To restore, first export `RESTIC_REPOSITORY` (the `BACKUP_REPOSITORY` path) and
+the password as above (`RESTIC_PASSWORD_FILE`, or on macOS
+`RESTIC_PASSWORD_COMMAND='security find-generic-password -a music-butler -s music-butler-restic -w'`).
+Then run `restic restore latest --target /tmp/restore`, copy the library and
+`.env`/`secrets` back, and with Navidrome stopped run
+`docker compose run --rm navidrome backup restore --backup-file /data/backup/<file>.db`
+(the image's entrypoint is already `/app/navidrome`).
 
 ## Operate and validate
 
 ```sh
 docker compose ps
 docker compose logs --since 10m navidrome
-bash -n scripts/download_music.sh
 # Host tests: Python 3.12, ffmpeg, locked dependencies (see validation guide).
 ./scripts/validate.sh
 docker compose --env-file .env.example --profile tools --profile hermes config --quiet
 ```
 
 [BLUEPRINT.md](BLUEPRINT.md) covers the exact request contract, upstream evidence,
-permissions, secrets, recovery, backups, legal constraints and limitations.
+permissions, secrets, recovery, backups and limitations.
 [docs/VALIDATION.md](docs/VALIDATION.md) records **what was actually tested**.
 The bundle is MIT-licensed; upstream software and imported content retain their
-own licenses. This is not Spotify, a streaming subscription, or an entitlement
-to download copyrighted recordings.
+own licenses.

@@ -18,7 +18,7 @@ were made to the upstream main checkout. No push or production deployment.
 | `docker compose --env-file .env.example --profile tools --profile hermes config --quiet` | exit 0; all profiles and example validated |
 | `./scripts/setup.sh` (without `--start`) | exit 0; generated ignored `.env`, provisioned this worktree's storage/secrets directories, printed “Configuration valid; storage provisioned” |
 | `docker compose config --quiet` using generated `.env` | exit 0 |
-| yt-dlp and spotDL `--help`, plus actual installed argument parsers in tests | accepted bundled flags; official Spotify API flag and empty lyrics provider list asserted |
+| yt-dlp `--help`, plus the actual installed argument parser in tests | accepted bundled flags asserted |
 | `uv pip compile ... --generate-hashes` | resolved **63 packages**, wrote exact/hash-locked transitive requirements |
 | Tooling Docker build, including `pip --require-hashes` | succeeded, `Image music-butler-tools:local Built` |
 | `python3 tests/container_smoke.py` | exit 0; **21 tests run in container, 20 passed, 1 intentionally skipped**, 4.675 s; Navidrome smoke passed |
@@ -61,14 +61,13 @@ See BLUEPRINT for source URLs rather than relying on an invented `/api/scan`.
 ### What the offline tests exercise
 
 - Valid single-song/album schema; invalid enums, unknown keys, invalid URLs,
-  credential-like URLs, controls, private DNS, missing rights assertion.
+  credential-like URLs, controls, private DNS.
 - Quoted/no-shell argument construction, Unicode/path traversal slugging,
   actual Bash stdin forwarding and malformed JSON exit 65.
 - Real media subprocess creation and SIGTERM cancellation/reaping.
-- Cancellation propagation through otherwise non-fatal artwork/lyrics/scan and
-  spotDL fallback paths; early rejection of unsupported host Python versions.
-- Installed yt-dlp/spotDL argument parsers; spotDL official API configuration,
-  missing-secret refusal and same-approved-URL fallback (no API access).
+- Cancellation propagation through otherwise non-fatal artwork/lyrics/scan
+  paths; early rejection of unsupported host Python versions.
+- Installed yt-dlp argument parser (bundled flags, no API access).
 - Generated two-second sine waves → **real FFmpeg MP3 and FLAC**, real Mutagen
   metadata/cover embedding, final audio hash verification.
 - Generated image → real FFmpeg JPEG normalization → MP3 APIC / FLAC PICTURE.
@@ -94,14 +93,8 @@ low-space test; the real importer retains its 2 GiB minimum-free-space check.
   guard because its tiny fixture library was in a 128 MiB tmpfs. The test fixture
   now mocks available capacity (and separately tests rejection), rather than
   weakening production checks. The final container run passed.
-- SpotDL 4.5.2 defaults to an unofficial client; inspection led to forcing the
-  official API and requiring operator credentials. No default embedded secret
-  or unofficial authentication flow is used.
 - Direct audio URLs can lack extractor duration metadata: the yt-dlp filter now
   permits unknown duration, with actual decoded duration checked before publish.
-- A third-party `PendingDeprecationWarning` from Starlette's `multipart` import
-  occurs when loading spotDL argument definitions. Tests pass; no web service
-  is started. This is not a dependency security audit.
 - Two combined terminal invocations were held for approval by the runner's
   command guard (chmod-plus-execution, and a multi-command Docker invocation).
   No user was present; they were not approved or relied upon as test results.
@@ -142,6 +135,33 @@ Each has a regression assertion in `tests/test_config.py` or `tests/test_pipelin
 | Backups | `scripts/backup.sh` against a temporary restic repository: backup, prune, `restic check`, and `restore-test` with all audio hashes identical; Navidrome `backup create` copy passed SQLite `integrity_check` |
 | Tests | 21 host tests pass, ShellCheck clean on all scripts |
 
+## Review fixes (2026-09-29) — NOT yet executed
+
+A code review found, and this revision changes, the following. They were
+written on a Windows machine that cannot run the stack, so **none of this has
+been run yet**. Rerun `scripts/validate.sh` and the container smoke test before
+relying on it.
+
+- The counts above ("21 tests") no longer match the repository: the suite at
+  review time had 20 test methods (a rights-assertion test described earlier no
+  longer existed). This revision adds `tests/test_agent.py` and two importer tests.
+- `scripts/agent.py`: added a `butler_write_request` tool (the model previously
+  had no way to write request files), argument checking so a bad tool call can't
+  crash the loop, no agent-side timeout for imports/backups, and process-group
+  termination on timeout/Ctrl+C. Ollama HTTP errors are reported by cause, and
+  `write-request` now goes straight to the model.
+- Artwork: `archive.org/download` URLs redirect to `*.archive.org` mirrors,
+  which the no-redirect client always refused. Artwork fetches now follow up to 3
+  redirects to allowlisted hosts, re-checking policy and public DNS for each hop.
+- `DOWNLOAD_ALLOWED_HOSTS` entries are stripped and lowercased.
+- `scripts/validate.sh` checked only the first script with `bash -n`; it now
+  checks each one.
+- `scripts/butler.sh` finds drives on Linux (`/run/media/$USER`, `/media`);
+  `scripts/backup.sh` skips missing optional paths, handles a never-started
+  Navidrome, restores only `music/` for `restore-test` after a free-space check,
+  and falls back to `sha256sum` when there is no `shasum`.
+- README restore command corrected to `docker compose run --rm navidrome backup restore ...`.
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):
@@ -169,7 +189,7 @@ project, publish ports, download music or contact chat/model services.
 
 ## Not tested / still required
 
-- spotDL with live Spotify API credentials, and YouTube sources.
+- YouTube sources.
 - An album (multi-track) import against a live source; albums are covered only by
   the offline tests.
 - Synced lyrics shown in Tempo for an imported song (none of the imported
