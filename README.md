@@ -38,22 +38,35 @@ cp config/request.example.json requests/approved-mine.json
 ```
 
 One request can hold many songs:
-`{"songs": [{"artist", "title", "url", "album"?, "artwork_url"?}, ...], "format"?, "quality"?}`.
+`{"songs": [{"artist", "title", "url", "album"?, "artists"?, "year"?, "artwork_url"?}, ...], "format"?, "quality"?}`.
+`artist` is the main (album) artist; `artists` lists everyone on the track, main artist first.
 Songs that share artist and album become one album in list order. Songs without
 `album` become singles named after the song. Releases are imported one after
 another. A bad or unavailable source skips to the next release; storage or lock
 problems stop the batch. The original single-release format (`kind`, `artist`,
 `album`, `tracks`) still works; see the [blueprint](BLUEPRINT.md#exact-downloader-contract).
-`butler.sh lookup` only returns search candidates. The agent chooses, and every
-imported track is an explicit URL in the request. No artist-wide crawling or
+`butler.sh lookup` only returns search candidates: YouTube Music songs first,
+then YouTube videos. Each result carries a `song` object with the names to tag:
+the release's own artist(s), title, album and year for YouTube Music / "Artist -
+Topic" uploads (`"names": "release"`), or names guessed from the video title
+with labels like "(Official Video)" removed (`"names": "guessed"`). The agent
+chooses and copies `song` and `url`; every imported track is an explicit URL in the request. No artist-wide crawling or
 playlist expansion. MP3 quality is
 `128|192|256|320`; FLAC compression is `0`–`8` (strings). Lossy-to-FLAC
 conversion cannot restore quality.
 
-**Tags** (title, artist, album artist, album, track n/total) always come from
-the request, never from YouTube/provider metadata. So a YouTube video titled
-"Artist - Song (Official Video) [HD]" is still tagged exactly as requested.
-Year, genre and disc numbers are not set.
+**Tags** (title, artist, album artist, album, track n/total, year, and a
+multi-valued `ARTISTS` tag) always come from the request, which the agent fills
+from lookup's `song`; the downloaded file's own metadata is never used. MP3s use
+ID3v2.4 so artist names containing "/" (`HUNTR/X`) stay whole. Genre and disc
+numbers are not set.
+
+**Consistency:** before anything downloads, the request is checked against the
+library. An artist or album that matches an existing one apart from case,
+punctuation or accents takes the library's spelling; a close but different
+artist is reported as a `similar_artist_in_library` note. A song already in the
+library (same main artist and title, or the same YouTube video) is refused with
+`already_in_library`.
 
 **Cover art:** an optional `artwork_url` (on an allowed host) is used first.
 Otherwise the source's own thumbnail (for YouTube, the video thumbnail) is
@@ -77,6 +90,26 @@ two; re-adding creates duplicates. Each **whole album** appears atomically in th
 Navidrome's watcher plus a one-minute schedule arranges discovery without
 credentials. Optional admin `startScan` is described in the blueprint; a scan
 request is **not** a guarantee that the library is already indexed.
+
+**Fixing the library later** (no re-download):
+
+```sh
+./scripts/butler.sh library          # every release: id, tags, cover/lyrics status (JSON)
+./scripts/butler.sh retag <id>       # requests/retag-<id>.json: {"changes": [{"release", "track"?,
+                                     #   "artist"?, "artists"?, "album"?, "title"?, "year"?,
+                                     #   "cover_from"? (a YouTube link) | "artwork_url"?}]}
+./scripts/butler.sh remove <id>      # requests/remove-<id>.json: {"releases": [...]} -> library .trash
+```
+
+`retag` rewrites tags on a copy and swaps it in; a new main `artist` keeps the
+featured artists. `remove` only moves releases to `<library>/.trash`; delete
+that folder yourself when you are sure. Both take the import lock and request a scan.
+[`skills/music-audit/SKILL.md`](skills/music-audit/SKILL.md) lets a stronger
+model do this periodically: read the library, confirm names with lookups, fix
+what is certain and report the rest.
+
+**Artist pictures** come from Navidrome's Deezer agent, by artist name (Navidrome
+sends artist names to Deezer). Set `DEEZER_ENABLED=false` in `.env` to turn it off.
 
 ## Local Ollama agent
 
@@ -121,7 +154,27 @@ library status and backups. Its commands are relative to this checkout; copy or
 symlink the folder into your agent's skills directory and replace `REPO` with the
 checkout path if the agent does not run from it. Typical locations (check your
 agent's docs): Claude Code `~/.claude/skills/`, Codex `~/.codex/skills/`, GitHub
-Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
+Copilot `.github/skills/`.
+
+**Hermes:** a dedicated profile keeps the skill out of your main agent.
+`hermes profile create music-butler --no-skills`, then
+`./scripts/install_hermes_skill.sh [profile]` (default `music-butler`) writes
+the skill into that profile with `REPO` replaced by this checkout's absolute
+path and a short note on Hermes' `write_file`/`terminal` tools. Re-run it after
+editing `SKILL.md`. In the profile's `config.yaml`, set `terminal.cwd` to this
+checkout and `terminal.timeout: 1800`, and add `TERMINAL_MAX_FOREGROUND_TIMEOUT=3600`
+to its `.env` so long imports are not cut off. Limiting `platform_toolsets` to
+`file`, `skills` and `terminal` keeps the prompt small. Tell the profile's
+`SOUL.md` to call `skill_view` for `music-butler` first: gateways do not preload skills.
+The installer also installs `music-audit`. For a weekly audit on a stronger
+model while chat stays local, run it from a no-agent cron script that calls
+`hermes -p <profile> chat -Q --provider <provider> -m <model> -t terminal,file,skills -s music-audit -q '...'`
+and set `cron.script_timeout_seconds` high enough (an LLM cron job in a profile
+whose default model is local Ollama picks the wrong Copilot API mode).
+For a local Ollama model, Hermes needs at least 64k context and cannot set it
+through Ollama's `/v1` API, so bake it into a model variant
+(`FROM gemma4:latest` / `PARAMETER num_ctx 65536`, `ollama create gemma4-64k`)
+and use `provider: custom`, `base_url: http://localhost:11434/v1`.
 
 - Agents run only [`scripts/butler.sh`](scripts/butler.sh), which accepts a request
   id or a drive name, never free text. Request data is a JSON file.
@@ -151,10 +204,12 @@ Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
 ├── config/
 │   └── request.example.json
 ├── skills/music-butler/SKILL.md     # agent skill (any SKILL.md-aware agent)
+├── skills/music-audit/SKILL.md      # periodic library clean-up skill
 ├── docker/Dockerfile
 ├── scripts/
 │   ├── butler.sh                    # fixed agent entry point
 │   ├── agent.py                     # local Ollama chat agent
+│   ├── install_hermes_skill.sh      # render the skills into a Hermes profile
 │   ├── backup.sh                    # encrypted restic backups
 │   ├── setup.sh
 │   ├── validate.sh
