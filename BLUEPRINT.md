@@ -137,7 +137,9 @@ tokens on the Internet. If binding a LAN/VPN IP using `BIND_ADDRESS`, restrict
 it in the host firewall. Container-side `127.0.0.1` is **not** the Docker host;
 tooling uses internal `http://navidrome:4533`. Loopback on your phone is the phone.
 No service gets host networking, Docker socket, privileged mode, SSH keys or your
-home directory. Public sharing and Navidrome insights/Deezer enrichment are off.
+home directory. Public sharing and Navidrome insights are off. Deezer is on for
+artist pictures only (Navidrome sends artist names to Deezer); `DEEZER_ENABLED=false`
+in `.env` turns it off.
 
 This is a **trusted single-operator executor**, not a public upload/download API:
 
@@ -170,8 +172,8 @@ This is a **trusted single-operator executor**, not a public upload/download API
 
 ## Exact downloader contract
 
-Entrypoint: executable `scripts/download_music.sh [--validate]`, reads one UTF-8
-JSON document from **stdin** (maximum 256 KiB). It uses strict Bash and a Python
+Entrypoint: executable `scripts/download_music.sh [--validate|--lookup|--retag|--remove|--library]`,
+reads one UTF-8 JSON document from **stdin** (maximum 256 KiB; `--library` reads none). It uses strict Bash and a Python
 3.12 helper for safe JSON parsing, cross-platform POSIX `flock`, HTTP, Mutagen,
 process groups and atomic directory operations rather than brittle shell JSON
 parsing. Runtime tools: `python3`, `ffmpeg`, `yt-dlp`, Mutagen;
@@ -184,11 +186,27 @@ shapes are accepted.
 
 **Songs list (recommended, what the agent skill writes):** `{"songs": [...],
 "format"?, "quality"?}` with 1–100 songs. Each song has exactly the keys
-`artist`, `title`, `url` (required) and `album`, `artwork_url` (optional; empty
-means absent). Songs sharing artist and album (case-insensitive) become one
-`album` release in list order; a song without `album` becomes a `song` release
-whose album is its title. `format`/`quality` apply to all. Validation errors
-carry `"song": N` (1-based).
+`artist`, `title`, `url` (required) and `album`, `artists` (1–20 strings, main
+artist first), `year` (1000–2100), `artwork_url` (optional; empty means absent).
+`artist` becomes the album artist; `artists` the track artist text and a
+multi-valued `ARTISTS` tag. Songs sharing artist and album (case-insensitive)
+become one `album` release in list order; a song without `album` becomes a
+`song` release whose album is its title. `format`/`quality` apply to all.
+Validation errors carry `"song": N` (1-based). Validation also compares the
+request with the library (when mounted): exact-but-for-case/punctuation artist
+and album names take the library's spelling, close names add a
+`similar_artist_in_library` note to the release, and songs already present
+(main artist + title, or the same YouTube video) fail with `already_in_library`.
+
+**Retag** (`--retag`): `{"changes": [{"release": "<32-hex id>", "track"?: n,
+"artist"?, "artists"?, "album"?, "title"?, "year"? (null removes),
+"cover_from"? | "artwork_url"?}]}`, up to 500 changes. Release ids are the hex
+suffix of the release folder (`--library` lists them). Each file is tagged as a
+copy and renamed over the original under the import lock; provenance records a
+`retagged` history. `cover_from` is a YouTube link whose thumbnail (only) is
+fetched with yt-dlp and centre-cropped. **Remove** (`--remove`): `{"releases":
+[ids]}` moves release folders to `<LIBRARY_ROOT>/.trash` (not scanned); nothing
+is deleted. Both end with one `summary` line and request a scan.
 
 **Single release (original contract):**
 

@@ -16,6 +16,9 @@ Usage: scripts/butler.sh <command>
   validate <id>    check requests/approved-<id>.json offline (no download)
   import <id>      import requests/approved-<id>.json into the library
   status           Navidrome health and library contents
+  library          every release with its id, tags, cover/lyrics status (JSON)
+  retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
+  remove <id>      move releases in requests/remove-<id>.json to the library trash
   drives           list mounted external drives (macOS /Volumes, Linux /media)
   backup [drive]   encrypted backup to <drive mount>/music-butler-restic,
                    or to BACKUP_REPOSITORY from .env when no drive is given
@@ -24,11 +27,16 @@ EOF
     exit 64
 }
 
-# request_file <kind> <id>: requests/<kind>-<id>.json, kind is approved or lookup.
+# request_file <kind> <id>: requests/<kind>-<id>.json, kind is approved, lookup, retag or remove.
 request_file() {
+    local id="${2:-}"
+    # Small models often pass the file name: requests/lookup-songs.json means id "songs".
+    id="${id#requests/}"
+    id="${id#"$1"-}"
+    id="${id%.json}"
     # No dots or slashes, so an id can never leave requests/.
-    [[ "${2:-}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'invalid request id: use lowercase letters, digits, dashes' >&2; exit 64; }
-    local file="requests/$1-$2.json"
+    [[ "$id" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'invalid request id: use lowercase letters, digits, dashes' >&2; exit 64; }
+    local file="requests/$1-$id.json"
     [[ -f "$file" && ! -L "$file" ]] || { echo "missing $file" >&2; exit 66; }
     printf '%s' "$file"
 }
@@ -87,6 +95,17 @@ case "${1:-}" in
     import)
         file="$(request_file approved "${2:-}")"
         "${compose[@]}" run --rm -T downloader < "$file"
+        ;;
+    library)
+        "${compose[@]}" run --rm -T downloader --library < /dev/null
+        ;;
+    retag)
+        file="$(request_file retag "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --retag < "$file"
+        ;;
+    remove)
+        file="$(request_file remove "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --remove < "$file"
         ;;
     status)
         "${compose[@]}" ps navidrome

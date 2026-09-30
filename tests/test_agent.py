@@ -28,7 +28,7 @@ class Tools(unittest.TestCase):
     def test_add_writes_songs_file_and_runs_add_without_timeout(self):
         args = {"format": "", "junk": 1, "songs": [
             {"artist": "A", "title": "T", "url": "https://archive.org/download/x/t.flac",
-             "album": "", "artwork_url": None, "year": 1999},
+             "album": "", "artwork_url": None, "genre": "Jazz", "year": 1999},
             {"artist": "B", "title": "U", "url": "https://youtu.be/abc"}]}
         with patch.object(agent, "run_butler", return_value=(0, "")) as run:
             agent.call_tool("butler_add", json.dumps(args))
@@ -38,7 +38,7 @@ class Tools(unittest.TestCase):
         written = json.loads((Path(self.tmp.name) / f"approved-{command[1]}.json").read_text(encoding="utf-8"))
         # Empty/unknown keys a small model adds are dropped; the importer validates the rest.
         self.assertEqual(written, {"songs": [
-            {"artist": "A", "title": "T", "url": "https://archive.org/download/x/t.flac"},
+            {"artist": "A", "title": "T", "url": "https://archive.org/download/x/t.flac", "year": 1999},
             {"artist": "B", "title": "U", "url": "https://youtu.be/abc"}]})
 
     def test_single_song_object_is_wrapped(self):

@@ -137,6 +137,40 @@ class Contract(unittest.TestCase):
             with self.subTest(bad=str(bad)[:40]), self.assertRaises(b.Failure):
                 b.parse(bad)
 
+    def test_songs_artists_and_year(self):
+        song = {"artist": "HUNTR/X", "title": "Golden", "url": "https://youtu.be/one", "album": "Golden",
+                "artists": ["HUNTR/X", "EJAE"], "year": "2025"}
+        track = b.parse({"songs": [song]})[0]["tracks"][0]
+        self.assertEqual((track["artists"], track["year"], track["song"]), (["HUNTR/X", "EJAE"], 2025, 1))
+        for change, reason in [({"artists": "HUNTR/X"}, "invalid_artists"), ({"artists": []}, None),
+                               ({"year": 99}, "invalid_year"), ({"year": True}, "invalid_year")]:
+            with self.subTest(change=change):
+                if reason is None:
+                    self.assertNotIn("artists", b.parse({"songs": [{**song, **change}]})[0]["tracks"][0])
+                    continue
+                with self.assertRaises(b.Failure) as cm:
+                    b.parse({"songs": [{**song, **change}]})
+                self.assertEqual(str(cm.exception), reason)
+
+    def test_retag_and_remove_requests(self):
+        rid = "a" * 32
+        self.assertEqual(b.validate_changes({"changes": [{"release": rid, "artist": "HUNTR/X", "year": None}]}),
+                         [{"release": rid, "artist": "HUNTR/X", "year": None}])
+        for bad, reason in [({"changes": [{"release": rid}]}, "invalid_change_keys"),
+                            ({"changes": [{"release": "../x", "album": "A"}]}, "invalid_release_id"),
+                            ({"changes": [{"release": rid, "track": 0, "title": "T"}]}, "invalid_track_number"),
+                            ({"changes": [{"release": rid, "cover_from": "https://evil.test/x"}]}, "source_url_not_allowed"),
+                            ({"changes": [{"release": rid, "cover_from": "https://youtu.be/x",
+                                           "artwork_url": "https://archive.org/a.jpg"}]}, "one_cover_source_only"),
+                            ({"changes": []}, "invalid_change_count")]:
+            with self.subTest(reason=reason), self.assertRaises(b.Failure) as cm:
+                b.validate_changes(bad)
+            self.assertEqual(str(cm.exception), reason)
+        self.assertEqual(b.validate_removal({"releases": [rid, rid]}), [rid])
+        for bad in [{"releases": []}, {"releases": ["x"]}, {"ids": [rid]}]:
+            with self.subTest(bad=bad), self.assertRaises(b.Failure):
+                b.validate_removal(bad)
+
     def test_cli_songs_validate(self):
         body = {"songs": [{"artist": "A", "title": "T", "url": "https://youtu.be/one"},
                           {"artist": "A", "title": "U", "url": "https://youtu.be/two"}]}
@@ -218,42 +252,71 @@ class NetworkMocks(unittest.TestCase):
 
     def test_lookup_returns_only_safe_fields(self):
         flat = [
-            {"id": "AAAAAAAAAAA", "ie_key": "Youtube", "title": "Song (Official Video) [HD]", "channel": "ArtistVEVO",
+            {"id": "AAAAAAAAAAA", "ie_key": "Youtube", "title": "Artist - Song (Official Video) [HD]", "channel": "ArtistVEVO",
              "duration": 245.0, "url": "https://rr1---sn.googlevideo.com/signed?sig=SECRET"},
             {"id": "BBBBBBBBBBB", "ie_key": "Youtube", "title": "Song", "channel": "Artist - Topic", "duration": 231},
+            {"id": "MMMMMMMMMMM", "ie_key": "Youtube", "title": "Song", "channel": "Artist - Topic"},
             {"id": "CCCCCCCCCCC", "ie_key": "Youtube", "title": "Live now", "channel": "X", "live_status": "is_live"},
             {"id": "DDDDDDDDDDD", "ie_key": "Youtube", "title": "10 hour loop", "channel": "Y", "duration": 36000},
             {"id": "UCchannel-not-a-video", "ie_key": "YoutubeTab", "title": "Artist", "channel": "Artist"}]
-        full = {"id": "BBBBBBBBBBB", "extractor_key": "Youtube", "title": "Song", "channel": "Artist - Topic",
-                "duration": 231, "artist": "Artist", "track": "Song​", "album": "LP",
-                "formats": [{"url": "https://rr1---sn.googlevideo.com/signed?sig=SECRET"}]}
+        music = [{"id": "MMMMMMMMMMM", "ie_key": "Youtube", "title": "Song", "url": "https://music.youtube.com/watch?v=MMMMMMMMMMM"},
+                 {"id": "NNNNNNNNNNN", "ie_key": "Youtube", "title": "No metadata"}]
+        full = {"BBBBBBBBBBB": {"id": "BBBBBBBBBBB", "extractor_key": "Youtube", "title": "Song", "channel": "Artist - Topic",
+                                "duration": 231, "artist": "Artist", "track": "Song\u200b", "album": "LP",
+                                "formats": [{"url": "https://rr1---sn.googlevideo.com/signed?sig=SECRET"}]},
+                "MMMMMMMMMMM": {"id": "MMMMMMMMMMM", "extractor_key": "Youtube", "title": "Song", "channel": "Artist - Topic",
+                                "duration": 230, "artists": ["Artist", "Guest"], "track": "Song", "album": "LP",
+                                "release_year": 2020},
+                "NNNNNNNNNNN": {"id": "NNNNNNNNNNN", "extractor_key": "Youtube", "title": "No metadata", "duration": 200}}
         calls = []
         def fake_capture(argv, cwd, env, **kwargs):
             calls.append(argv)
             self.assertNotIn("NAVIDROME_PASSWORD_FILE", env)
             self.assertEqual(argv[:3], ["yt-dlp", "--ignore-config", "--no-plugin-dirs"])
+            if argv[-1].startswith("https://music.youtube.com/search?"):
+                self.assertEqual(argv[-1], "https://music.youtube.com/search?q=Artist%20Song#songs")
+                return music
             if argv[-1].startswith("ytsearch"):
-                self.assertEqual(argv[-2:], ["--", "ytsearch5:Artist Song"])
+                self.assertEqual(argv[-2:], ["--", "ytsearch3:Artist Song"])
                 return flat
             if argv[-1] == "https://youtu.be/broken":
                 raise b.Failure("media_tool_failed", 69)
-            return [full]
+            vid = argv[-1][-11:]
+            return [full[vid]]
         with patch.object(b, "capture", side_effect=fake_capture), contextlib.redirect_stdout(io.StringIO()) as output:
             b.lookup({"search": ["Artist Song"], "urls": ["https://youtu.be/BBBBBBBBBBB", "https://youtu.be/broken"]})
         line = output.getvalue().strip()
         self.assertNotIn("SECRET", line)
-        self.assertNotIn("album", line)  # album would make the model group singles into a fake album
         event = json.loads(line)
         results = event["search"][0]["results"]
-        self.assertEqual([r["url"] for r in results], ["https://www.youtube.com/watch?v=AAAAAAAAAAA",
-                                                       "https://www.youtube.com/watch?v=BBBBBBBBBBB"])
-        self.assertEqual(results[1], {"title": "Song", "channel": "Artist - Topic", "duration": 231,
-                                      "url": "https://www.youtube.com/watch?v=BBBBBBBBBBB",
-                                      "artist": "Artist", "track": "Song"})
-        self.assertNotIn("track", results[0])  # only Topic results are enriched
-        self.assertEqual(event["urls"][0]["track"], "Song")
+        # YouTube Music first (only results with release metadata), then new videos.
+        self.assertEqual([r["url"][-11:] for r in results], ["MMMMMMMMMMM", "AAAAAAAAAAA", "BBBBBBBBBBB"])
+        self.assertEqual(results[0], {"title": "Song", "channel": "Artist - Topic", "duration": 230,
+                                      "url": "https://www.youtube.com/watch?v=MMMMMMMMMMM", "names": "release",
+                                      "song": {"artist": "Artist", "title": "Song", "artists": ["Artist", "Guest"],
+                                               "album": "LP", "year": 2020}, "source": "youtube_music"})
+        self.assertEqual(results[1]["names"], "guessed")
+        self.assertEqual(results[1]["song"], {"artist": "Artist", "title": "Song"})
+        self.assertEqual(results[2]["song"], {"artist": "Artist", "title": "Song", "album": "LP"})
+        self.assertEqual(event["urls"][0]["song"]["title"], "Song")
         self.assertEqual(event["urls"][1], {"url": "https://youtu.be/broken", "error": "lookup_failed"})
-        self.assertEqual(len(calls), 4)  # search, 1 Topic enrichment, 2 urls
+        # music search, 2 music details, video search, 1 Topic enrichment, 2 urls
+        self.assertEqual(len(calls), 7)
+
+    def test_guess_song_cleans_video_titles(self):
+        for title, song in [
+                ("“Golden” Official Lyric Video | KPop Demon Hunters | Sony Animation", {"title": "Golden"}),
+                ("Djo - End Of Beginning (Official Audio)", {"artist": "Djo", "title": "End Of Beginning"}),
+                ("Daft Punk - Get Lucky (Official Audio) ft. Pharrell Williams, Nile Rodgers",
+                 {"artist": "Daft Punk", "title": "Get Lucky (feat. Pharrell Williams, Nile Rodgers)"}),
+                ("Dj Matrix, Paps'n'Skar - Fanno Bam - GABRY PONTE REMIX (feat. Vise)",
+                 {"artist": "Dj Matrix, Paps'n'Skar", "title": "Fanno Bam (GABRY PONTE REMIX) (feat. Vise)"}),
+                ("Queen – Bohemian Rhapsody (Official Video Remastered)", {"artist": "Queen", "title": "Bohemian Rhapsody"}),
+                ("Artist - Song (Live Video) [HD]", {"artist": "Artist", "title": "Song (Live Video)"}),
+                ("Artist - Track (Remastered 2011)", {"artist": "Artist", "title": "Track (Remastered 2011)"}),
+                ("", None)]:
+            with self.subTest(title=title):
+                self.assertEqual(b.guess_song(title), song)
 
     def test_lookup_search_failure_is_per_query_but_interrupt_propagates(self):
         with patch.object(b, "capture", side_effect=b.Failure("media_tool_timeout", 69)), \
@@ -271,7 +334,7 @@ class NetworkMocks(unittest.TestCase):
         with patch.object(b, "capture", side_effect=lambda argv, *a, **k: argvs.append(argv) or []), \
                 contextlib.redirect_stdout(io.StringIO()):
             b.lookup({"search": ["Artist Song"], "urls": ["https://youtu.be/BBBBBBBBBBB"]})
-        self.assertEqual(len(argvs), 2)
+        self.assertEqual(len(argvs), 3)  # YouTube Music search, video search, url
         for argv in argvs:
             yt_dlp.parse_options(argv[1:])
 
@@ -299,6 +362,12 @@ class NetworkMocks(unittest.TestCase):
                     self.assertIn("/api/search?", fetch.call_args_list[1].args[0])
                     self.assertNotIn("album_name", fetch.call_args_list[1].args[0])
             self.assertEqual(dest.with_suffix(".lrc").read_text(), "[00:01.00]Found")
+            # LRCLIB often credits every performer; the main artist must be one of them.
+            for credit, expected in [("Test Artist, Guest & Other", "synced"), ("Test Artist feat. Guest", "synced"),
+                                     ("Not Test Artist", "unavailable"), ("Test Artistry", "unavailable")]:
+                with self.subTest(credit=credit), patch.object(
+                        b, "fetch", side_effect=[not_found, json.dumps([hit(artistName=credit)]).encode()]):
+                    self.assertEqual(b.Lyrics(self.root).get(request(), track, 180.4, dest), expected)
 
     def test_import_all_continues_past_bad_sources_and_stops_on_storage(self):
         releases = b.parse({"songs": [
@@ -539,6 +608,104 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(result["tracks"][0]["title"], "Test Tone")
         audio = next(Path(result["path"]).glob("*.mp3"))
         self.assertEqual(len(MP3(audio).tags.getall("APIC")), 1)
+
+    def add(self, songs, fmt="mp3"):
+        with patch.object(b, "acquire", side_effect=lambda t, r, w, e: self.acquire_any(w)), \
+                patch.object(b.Lyrics, "get", return_value="unavailable"), patch.object(b, "scan", return_value="scheduled"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            releases = b.parse({"songs": songs, "format": fmt})
+            b.check_library(releases)
+            return [b.ingest(r) for r in releases], releases
+
+    def acquire_any(self, work):
+        path = work / "source.flac"
+        shutil.copyfile(self.sine, path)
+        return path, "mock-generated-sine"
+
+    def test_library_names_duplicates_retag_and_remove(self):
+        from mutagen.mp3 import MP3
+        from mutagen.flac import FLAC
+        golden = {"artist": "HUNTR/X", "title": "Golden", "album": "Golden", "year": 2025,
+                  "artists": ["HUNTR/X", "EJAE", "AUDREY NUNA"], "url": "https://youtu.be/AAAAAAAAAAA"}
+        (first,), _ = self.add([golden])
+        mp3 = next(Path(first["path"]).glob("*.mp3"))
+        tags = MP3(mp3).tags
+        self.assertEqual(tags.version[:2], (2, 4))
+        self.assertEqual(str(tags["TPE1"]), "HUNTR/X, EJAE & AUDREY NUNA")
+        self.assertEqual(tags["TXXX:ARTISTS"].text, ["HUNTR/X", "EJAE", "AUDREY NUNA"])
+        self.assertEqual((str(tags["TPE2"]), str(tags["TDRC"])), ("HUNTR/X", "2025"))
+        (lib,) = b.read_library()
+        self.assertEqual((lib["artist"], lib["album"], lib["year"], lib["tracks"][0]["url"]),
+                         ("HUNTR/X", "Golden", "2025", "https://youtu.be/AAAAAAAAAAA"))
+        self.assertTrue(lib["tracks"][0]["cover"] is False and lib["tracks"][0]["lyrics"] is False)
+
+        # Same song again (other upload, other spelling) is refused before any download.
+        for dup in [{**golden, "url": "https://youtu.be/BBBBBBBBBBB", "artist": "Huntr X"},
+                    {"artist": "Someone", "title": "Other", "url": "https://www.youtube.com/watch?v=AAAAAAAAAAA"}]:
+            with self.subTest(dup=dup), self.assertRaises(b.Failure) as cm:
+                b.check_library(b.parse({"songs": [{"artist": "Z", "title": "First", "url": "https://youtu.be/CCCCCCCCCCC"}, dup]}))
+            self.assertEqual((str(cm.exception), cm.exception.item), ("already_in_library", 2))
+        # New song: library spelling is reused; a near miss is only a note.
+        releases = b.parse({"songs": [{"artist": "huntr/x", "title": "Takedown", "album": "golden",
+                                       "url": "https://youtu.be/DDDDDDDDDDD"},
+                                      {"artist": "Huntrix", "title": "Soda Pop", "url": "https://youtu.be/EEEEEEEEEEE"}]})
+        b.check_library(releases)
+        self.assertEqual((releases[0]["artist"], releases[0]["album"]), ("HUNTR/X", "Golden"))
+        self.assertEqual([n["note"] for n in releases[0]["notes"]], ["artist_spelling_from_library", "album_spelling_from_library"])
+        self.assertEqual(releases[1]["notes"], [{"note": "similar_artist_in_library", "given": "Huntrix", "existing": "HUNTR/X"}])
+        self.assertEqual(releases[1]["artist"], "Huntrix")
+
+        # Retag: a new main artist keeps the featured artists; other tags stay.
+        (flac_result,), _ = self.add([{"artist": "Djo", "title": "End Of Beginning (Official Audio)",
+                                       "url": "https://youtu.be/FFFFFFFFFFF"}], fmt="flac")
+        flac_id = Path(flac_result["path"]).name[-32:]
+        with patch.object(b, "scan", return_value="requested"), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = b.retag(b.validate_changes({"changes": [
+                {"release": lib["id"], "artist": "HUNTRIX"},
+                {"release": flac_id, "track": 1, "title": "End of Beginning", "album": "DECIDE", "year": 2022},
+                {"release": "f" * 32, "album": "Nope"}]}))
+        summary = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual(code, 65)
+        self.assertEqual([c["change"] for c in summary["changed"]], [1, 2])
+        self.assertEqual([(f["change"], f["reason"]) for f in summary["failed"]], [(3, "unknown_release")])
+        self.assertEqual(summary["scan"], "requested")
+        tags = MP3(mp3).tags
+        self.assertEqual((str(tags["TPE2"]), str(tags["TPE1"]), tags["TXXX:ARTISTS"].text),
+                         ("HUNTRIX", "HUNTRIX, EJAE & AUDREY NUNA", ["HUNTRIX", "EJAE", "AUDREY NUNA"]))
+        self.assertEqual(str(tags["TIT2"]), "Golden")  # untouched
+        flac = FLAC(next(Path(flac_result["path"]).glob("*.flac")))
+        self.assertEqual((flac["title"], flac["album"], flac["date"], flac["artist"]),
+                         (["End of Beginning"], ["DECIDE"], ["2022"], ["Djo"]))
+        receipt = json.loads((Path(flac_result["path"]) / "provenance.json").read_text())
+        self.assertEqual(receipt["retagged"][0]["change"]["title"], "End of Beginning")
+        self.assertEqual([p.name for p in Path(flac_result["path"]).iterdir() if p.name.startswith(".")], [])
+
+        # Remove moves the release to the trash; nothing is deleted.
+        with patch.object(b, "scan", return_value="requested"), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(b.remove([lib["id"], "e" * 32]), 65)
+        summary = json.loads(out.getvalue())
+        self.assertEqual((summary["removed"], summary["failed"][0]["reason"]), ([lib["id"]], "unknown_release"))
+        self.assertFalse(Path(first["path"]).exists())
+        self.assertTrue((self.root / ".trash" / Path(first["path"]).name / mp3.name).is_file())
+        self.assertEqual([r["id"] for r in b.read_library()], [flac_id])
+
+    def test_retag_cover_and_busy_lock(self):
+        (result,), _ = self.add([{"artist": "A", "title": "T", "url": "https://youtu.be/AAAAAAAAAAA"}])
+        rid = Path(result["path"]).name[-32:]
+        def thumbnail(argv, cwd, env, **kwargs):
+            self.assertIn("--skip-download", argv)
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=64x36",
+                            "-frames:v", "1", str(Path(cwd) / "thumb.jpg")], check=True)
+        with patch.object(b, "run", side_effect=thumbnail) as run, patch.object(b, "source_thumbnail", return_value=b"\xff\xd8cover"), \
+                patch.object(b, "scan", return_value="requested"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(b.retag([{"release": rid, "cover_from": "https://youtu.be/BBBBBBBBBBB"}]), 0)
+        self.assertEqual(run.call_args.args[0][-2:], ["--", "https://youtu.be/BBBBBBBBBBB"])
+        self.assertTrue(b.read_library()[0]["tracks"][0]["cover"])
+        with open(self.root / ".ingest.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            for call in (lambda: b.retag([{"release": rid, "album": "X"}]), lambda: b.remove([rid])):
+                with self.subTest(call=call), self.assertRaisesRegex(b.Failure, "busy_retry_later"):
+                    call()
 
     def test_real_artwork_encoding(self):
         from mutagen.mp3 import MP3

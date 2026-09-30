@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import datetime
+import difflib
 import email.utils
 import fcntl
 import hashlib
@@ -32,6 +33,7 @@ DEFAULT_HOSTS = ("archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,y
                  "m.youtube.com,music.youtube.com")
 YOUTUBE_HOSTS = {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
 MAX_SONGS = 100
+SONG_KEYS = {"artist", "title", "url", "album", "artists", "year", "artwork_url"}
 # Batch imports continue past these per-release failures; anything else stops the batch.
 CONTINUE_CODES = {65, 69}
 
@@ -122,8 +124,28 @@ def blank(value):
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def artist_list(value):
+    """All performers, main artist first: ["HUNTR/X", "EJAE", ...]."""
+    if not isinstance(value, list) or not 1 <= len(value) <= 20:
+        raise Failure("invalid_artists")
+    return [text(v, "artists") for v in value]
+
+
+def release_year(value):
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1000 <= value <= 2100:
+        raise Failure("invalid_year")
+    return value
+
+
+def display_artist(artists):
+    return artists[0] if len(artists) == 1 else ", ".join(artists[:-1]) + " & " + artists[-1]
+
+
 def validate_songs(data, resolve=False):
-    """Flat song list, the easy format for agents: {"songs": [{artist, title, url, album?, artwork_url?}]}.
+    """Flat song list, the easy format for agents:
+    {"songs": [{artist, title, url, album?, artists?, year?, artwork_url?}]}.
 
     Songs that share artist and album become one album release, in list order.
     A song without an album is its own single, named after the song.
@@ -138,17 +160,21 @@ def validate_songs(data, resolve=False):
     releases, seen = {}, set()
     for n, song in enumerate(songs, 1):
         try:
-            if not isinstance(song, dict) or set(song) - {"artist", "title", "url", "album", "artwork_url"}:
+            if not isinstance(song, dict) or set(song) - SONG_KEYS:
                 raise Failure("invalid_song_keys")
             artist = text(song.get("artist"), "artist")
             title = text(song.get("title"), "title")
             album = None if blank(song.get("album")) else text(song.get("album"), "album")
-            t = {"title": title, "url": url(song.get("url"), hosts, resolve)}
+            t = {"title": title, "url": url(song.get("url"), hosts, resolve), "song": n}
             if t["url"] in seen:
                 raise Failure("duplicate_source_url")
             seen.add(t["url"])
             if not blank(song.get("artwork_url")):
                 t["artwork_url"] = url(song["artwork_url"], hosts, resolve)
+            if song.get("artists") not in (None, []):
+                t["artists"] = artist_list(song["artists"])
+            if not blank(song.get("year")):
+                t["year"] = release_year(song["year"])
         except Failure as exc:
             exc.item = n
             raise
@@ -170,8 +196,11 @@ def parse(data, resolve=False):
 
 
 def describe(release):
-    return {"artist": release["artist"], "album": release["album"], "kind": release["kind"],
-            "titles": [t["title"] for t in release["tracks"]]}
+    out = {"artist": release["artist"], "album": release["album"], "kind": release["kind"],
+           "titles": [t["title"] for t in release["tracks"]]}
+    if release.get("notes"):
+        out["notes"] = release["notes"]
+    return out
 
 
 def slug(value):
@@ -287,9 +316,73 @@ def acquire(track, request, work, env):
 
 
 MAX_LOOKUPS = 10
-SEARCH_RESULTS = 5
+MUSIC_RESULTS = 3  # YouTube Music "songs": studio audio with the release's own names
+SEARCH_RESULTS = 3  # plain YouTube videos, the fallback
 ENRICH_PER_SEARCH = 2
 YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# Bracketed parts naming the upload, not the recording: "(Official Audio)", "[HD]".
+LABEL = re.compile(r"\b(?:official|lyrics?|audio|video|visuali[sz]er|mv|m/v|hd|hq|4k|8k|videoclip|clip)\b", re.I)
+# ...unless they also name a different recording: "(Live Video)" stays "(Live Video)".
+RECORDING = re.compile(r"\b(?:live|remix|mix|edit|acoustic|version|cover|instrumental|demo)\b", re.I)
+TRAILING_LABEL = re.compile(r"\s+(?:official\s+)?(?:lyrics?\s+video|music\s+video|lyrics?|video|audio|visuali[sz]er)\s*$", re.I)
+BRACKETED_FEAT = re.compile(r"\s*[(\[]\s*(?:feat|ft|featuring)\.?\s+([^)\]]+?)\s*[)\]]", re.I)
+BARE_FEAT = re.compile(r"\s+(?:feat|ft|featuring)\.?\s+(.+?)(?=\s+[-–—]\s+|\s*[(\[|]|$)", re.I)
+DASHED_VERSION = re.compile(r"\s+[-–—]\s+([^-–—()]*\b(?:remix|mix|edit|version|live|acoustic|remaster(?:ed)?)\b[^-–—()]*)$", re.I)
+QUOTED = re.compile(r"[\"“”'‘’«»](.+)[\"“”'‘’«»]")
+
+
+def is_label(inner):
+    """True for "(Official Video)" or "(Official Video Remastered)", not "(Live)" or "(Remastered 2011)"."""
+    if not LABEL.search(inner) or RECORDING.search(inner):
+        return False
+    return not re.search(r"\bremaster(?:ed)?\b", inner, re.I) or bool(re.search(r"\bvideo\b", inner, re.I))
+
+
+def guess_song(video_title):
+    """Best-effort artist/title from a video title such as "Artist - Song (Official Video) ft. X".
+
+    Only a suggestion: YouTube Music results carry the release's real names instead.
+    """
+    value = (video_title or "").split(" | ")[0].strip()
+    featured = [m.strip() for m in BRACKETED_FEAT.findall(value) + BARE_FEAT.findall(value)]
+    value = BARE_FEAT.sub("", BRACKETED_FEAT.sub("", value))
+    value = re.sub(r"\s*[(\[【]([^()\[\]【】]*)[)\]】]", lambda m: "" if is_label(m.group(1)) else m.group(0), value)
+    artist, title = None, value
+    parts = re.split(r"\s+[-–—]\s+", value, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        artist, title = parts[0].strip(), parts[1].strip()
+    title = DASHED_VERSION.sub(r" (\1)", title)
+    previous = None
+    while previous != title:
+        previous, title = title, TRAILING_LABEL.sub("", title).strip()
+    quoted = QUOTED.fullmatch(title)
+    title = (quoted.group(1) if quoted else title).strip()
+    if featured:
+        title += " (feat. " + " & ".join(featured) + ")"
+    song = {"title": clip(title)} if clip(title) else {}
+    if artist and clip(artist):
+        song = {"artist": clip(artist), **song}
+    return song or None
+
+
+def release_song(entry):
+    """The release's own names from a YouTube Music / "Artist - Topic" upload, or None."""
+    if not isinstance(entry, dict):
+        return None
+    artists = entry.get("artists") if isinstance(entry.get("artists"), list) else [entry.get("artist")]
+    artists = [a for a in (clip(a) for a in artists[:20]) if a]
+    title = clip(entry.get("track"))
+    if not artists or not title:
+        return None
+    song = {"artist": artists[0], "title": title}
+    if len(artists) > 1:
+        song["artists"] = artists
+    if clip(entry.get("album")):
+        song["album"] = clip(entry.get("album"))
+    year = entry.get("release_year")
+    if isinstance(year, int) and not isinstance(year, bool) and 1000 <= year <= 2100:
+        song["year"] = year
+    return song
 
 
 def validate_lookup(data, resolve=False):
@@ -343,10 +436,13 @@ def video_summary(entry, given_url=None):
         return None
     summary = {"title": clip(entry.get("title")), "channel": clip(entry.get("channel") or entry.get("uploader")),
                "duration": duration, "url": link}
-    # YouTube Music uploads ("Artist - Topic") carry clean artist/track names.
-    for key in ("artist", "track"):
-        if clip(entry.get(key)):
-            summary[key] = clip(entry.get(key))
+    # YouTube Music uploads ("Artist - Topic") carry the release's own names;
+    # anything else gets names guessed from the video title.
+    song = release_song(entry)
+    summary["names"] = "release" if song else "guessed"
+    song = song or guess_song(summary["title"])
+    if song:
+        summary["song"] = song
     return summary
 
 
@@ -369,15 +465,32 @@ def lookup(query):
                     raise
                 return {"error": failure}
 
+        def enrich(r):
+            # Full metadata (artists, album, year, duration) needs one request per result.
+            extra = guarded(lambda: video_summary(details(r["url"])) or {}, "details_failed")
+            if extra.get("names") == "release":
+                r.update({k: extra[k] for k in ("title", "channel", "duration", "names", "song") if extra.get(k)})
+            elif r.get("duration") is None and extra.get("duration"):
+                r["duration"] = extra["duration"]
+            return r
+
         def search(q):
-            entries = capture([*ytdlp_base(), "--flat-playlist", "--dump-json", "--",
-                               f"ytsearch{SEARCH_RESULTS}:{q}"], tmp, env)
-            results = [r for r in map(video_summary, entries) if r]
-            topic = [r for r in results if (r["channel"] or "").endswith(" - Topic")][:ENRICH_PER_SEARCH]
+            # YouTube Music "songs" first: studio audio with the release's artist/title/album.
+            music = guarded(lambda: capture(
+                [*ytdlp_base(), "--flat-playlist", "--dump-json", "--playlist-items", f"1:{MUSIC_RESULTS}", "--",
+                 "https://music.youtube.com/search?q=" + urllib.parse.quote(q) + "#songs"], tmp, env), "search_failed")
+            music = [enrich(r) for r in map(video_summary, music if isinstance(music, list) else []) if r]
+            music = [r for r in music if r["names"] == "release"]
+            videos = capture([*ytdlp_base(), "--flat-playlist", "--dump-json", "--",
+                              f"ytsearch{SEARCH_RESULTS}:{q}"], tmp, env)
+            seen = {r["url"] for r in music}
+            videos = [r for r in map(video_summary, videos) if r and r["url"] not in seen]
+            topic = [r for r in videos if (r["channel"] or "").endswith(" - Topic")][:ENRICH_PER_SEARCH]
             for r in topic:
-                extra = guarded(lambda: video_summary(details(r["url"])) or {}, "details_failed")
-                r.update({k: extra[k] for k in ("artist", "track") if k in extra})
-            return {"query": q, "results": results}
+                enrich(r)
+            for r in music:
+                r["source"] = "youtube_music"
+            return {"query": q, "results": music + videos}
 
         def one_url(link):
             return video_summary(details(link), given_url=link) or {"url": link, "error": "not_importable"}
@@ -387,32 +500,91 @@ def lookup(query):
     emit("lookup", search=searches, urls=urls)
 
 
-def tag_audio(path, request, track, number, total, cover):
+ID3_FRAMES = {"title": "TIT2", "artist": "TPE1", "albumartist": "TPE2", "album": "TALB",
+              "year": "TDRC", "tracknumber": "TRCK"}
+VORBIS_KEYS = {"title": "title", "artist": "artist", "albumartist": "albumartist", "album": "album",
+               "year": "date", "artists": "artists"}
+
+
+def write_tags(path, fields, cover=None, fresh=False):
+    """Set the given tags (None removes one); keep the rest unless fresh.
+
+    fields: title, artist (display text), artists (list, multi-valued ARTISTS tag),
+    albumartist, album, year, tracknumber ((n, total)). ID3v2.4 keeps multi-valued
+    frames separate; v2.3 would join them with "/", which splits "HUNTR/X".
+    """
+    from mutagen import id3
     from mutagen.mp3 import MP3
-    from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TRCK, APIC
     from mutagen.flac import FLAC, Picture
     if path.suffix == ".mp3":
         audio = MP3(path)
-        tags = ID3()
-        for cls, value in ((TIT2, track["title"]), (TPE1, request["artist"]),
-                           (TPE2, request["artist"]), (TALB, request["album"]),
-                           (TRCK, f"{number}/{total}")):
-            tags.add(cls(encoding=3, text=[value]))
+        tags = id3.ID3() if fresh or audio.tags is None else audio.tags
+        for key, value in fields.items():
+            frame = "TXXX:ARTISTS" if key == "artists" else ID3_FRAMES[key]
+            tags.delall(frame)
+            if value is None:
+                continue
+            if key == "artists":
+                tags.add(id3.TXXX(encoding=3, desc="ARTISTS", text=list(value)))
+            else:
+                value = "%d/%d" % value if key == "tracknumber" else str(value)
+                tags.add(getattr(id3, frame)(encoding=3, text=[value]))
         if cover:
-            tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
-        tags.save(path, v2_version=3)
+            tags.delall("APIC")
+            tags.add(id3.APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
+        tags.save(path, v2_version=4)
     else:
         audio = FLAC(path)
-        audio.clear()
-        audio.update({"title": track["title"], "artist": request["artist"],
-                      "albumartist": request["artist"], "album": request["album"],
-                      "tracknumber": str(number), "tracktotal": str(total)})
+        if fresh:
+            audio.clear()
+            audio.clear_pictures()
+        for key, value in fields.items():
+            names = ("tracknumber", "tracktotal") if key == "tracknumber" else (VORBIS_KEYS[key],)
+            for name in names:
+                audio.pop(name, None)
+            if value is None:
+                continue
+            if key == "tracknumber":
+                audio["tracknumber"], audio["tracktotal"] = str(value[0]), str(value[1])
+            else:
+                audio[names[0]] = list(value) if key == "artists" else [str(value)]
         if cover:
+            audio.clear_pictures()
             pic = Picture()
             pic.type, pic.mime, pic.desc, pic.data = 3, "image/jpeg", "Cover", cover
             audio.add_picture(pic)
         audio.save()
-    duration = audio.info.length
+    return audio.info.length
+
+
+def read_tags(path):
+    from mutagen.mp3 import MP3
+    from mutagen.flac import FLAC
+    if path.suffix == ".mp3":
+        audio = MP3(path)
+        tags = audio.tags or {}
+
+        def first(frame):
+            return str(tags[frame].text[0]) if frame in tags and tags[frame].text else None
+        out = {k: first(f) for k, f in ID3_FRAMES.items() if k != "tracknumber"}
+        artists = tags.get("TXXX:ARTISTS")
+        out["artists"] = [str(a) for a in artists.text] if artists else None
+        out["cover"] = bool(tags and tags.getall("APIC"))
+    else:
+        audio = FLAC(path)
+        out = {k: (audio.get(v) or [None])[0] for k, v in VORBIS_KEYS.items() if k != "artists"}
+        out["artists"] = list(audio.get("artists", [])) or None
+        out["cover"] = bool(audio.pictures)
+    out["duration"] = round(audio.info.length)
+    return out
+
+
+def tag_audio(path, request, track, number, total, cover):
+    artists = track.get("artists") or [request["artist"]]
+    fields = {"title": track["title"], "artist": display_artist(artists),
+              "artists": artists if len(artists) > 1 else None, "albumartist": request["artist"],
+              "album": request["album"], "year": track.get("year"), "tracknumber": (number, total)}
+    duration = write_tags(path, fields, cover, fresh=True)
     if not math.isfinite(duration) or not 1 <= duration <= 3600:
         raise Failure("unsupported_audio_duration", 69)
     return duration
@@ -516,14 +688,19 @@ class Lyrics:
                                 headers={"User-Agent": self.agent}))
 
     def search(self, artist, title, duration):
-        """Exact artist+title (case-insensitive) within ±2 s that has synced lyrics, else None."""
+        """Exact title and an artist credit naming the main artist (case-insensitive),
+        within ±2 s, that has synced lyrics, else None. LRCLIB often credits every
+        performer ("HUNTR/X, EJAE & ...") where the library has the main artist.
+        """
         results = self.call("search", {"artist_name": artist, "track_name": title})
         if not isinstance(results, list):
             return None
         for item in results:
+            credit = str(item.get("artistName", "")).casefold() if isinstance(item, dict) else ""
             if (isinstance(item, dict) and isinstance(item.get("duration"), (int, float))
                     and abs(item["duration"] - duration) <= 2
-                    and str(item.get("artistName", "")).casefold() == artist.casefold()
+                    and (credit == artist.casefold()
+                         or artist.casefold() in re.split(r"\s*(?:,|&|\bfeat\.?|\bft\.?|\band\b|/(?=\s))\s*", credit))
                     and str(item.get("trackName", "")).casefold() == title.casefold()
                     and isinstance(item.get("syncedLyrics"), str)):
                 return item
@@ -584,23 +761,34 @@ def sync_tree(path):
         os.close(fd)
 
 
-def ingest(request):
+def library_root():
     root = Path(os.environ.get("LIBRARY_ROOT", "./storage/library")).absolute()
     # Parent mounts/ownership are provisioned by the administrator, not the agent.
     if not root.is_dir() or root.is_symlink():
         raise Failure("provision_library_root_first", 73)
-    root = root.resolve()
-    music = safe_dir(root / "music")
-    staging = safe_dir(root / ".staging")
-    logs = safe_dir(root / "logs")
-    if music.stat().st_dev != staging.stat().st_dev:
-        raise Failure("staging_must_share_filesystem", 73)
+    return root.resolve()
+
+
+@contextlib.contextmanager
+def library_lock(root):
+    """One writer at a time: imports, retags and removals."""
     fd = os.open(root / ".ingest.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Failure("busy_retry_later", 75) from exc
+        yield
+
+
+def ingest(request):
+    root = library_root()
+    music = safe_dir(root / "music")
+    staging = safe_dir(root / ".staging")
+    logs = safe_dir(root / "logs")
+    if music.stat().st_dev != staging.stat().st_dev:
+        raise Failure("staging_must_share_filesystem", 73)
+    with library_lock(root):
         if shutil.disk_usage(root).free < 2 * 1024 ** 3:
             raise Failure("insufficient_free_space", 73)
         for tool in ("yt-dlp", "ffmpeg"):
@@ -670,6 +858,282 @@ def ingest(request):
             raise
 
 
+RELEASE_DIR = re.compile(r"--([0-9a-f]{32})$")
+AUDIO_SUFFIXES = (".mp3", ".flac")
+
+
+def norm(value):
+    """Comparison key: "HUNTR/X" == "Huntr X", "Beyoncé" == "Beyonce"."""
+    value = unicodedata.normalize("NFKD", value or "").casefold()
+    return "".join(c for c in value if c.isalnum())
+
+
+def video_id(link):
+    p = urllib.parse.urlsplit(link or "")
+    if p.hostname not in YOUTUBE_HOSTS:
+        return None
+    vid = p.path.strip("/") if p.hostname == "youtu.be" else (urllib.parse.parse_qs(p.query).get("v") or [""])[0]
+    return vid if YOUTUBE_ID.match(vid or "") else None
+
+
+def release_dirs(music):
+    return sorted(d for d in music.iterdir() if d.is_dir() and not d.is_symlink() and RELEASE_DIR.search(d.name))
+
+
+def audio_files(folder):
+    return sorted(p for p in folder.iterdir() if p.suffix in AUDIO_SUFFIXES and p.is_file() and not p.is_symlink())
+
+
+def read_release(folder):
+    """Tags are the truth (they may have been retagged); provenance adds the source URLs."""
+    urls = {}
+    with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+        receipt = json.loads((folder / "provenance.json").read_text(encoding="utf-8"))
+        for source, done in zip(receipt["request"]["tracks"], receipt["tracks"]):
+            urls[done["file"]] = source["url"]
+    tracks = []
+    for n, path in enumerate(audio_files(folder), 1):
+        try:
+            tags = read_tags(path)
+        except Exception:  # an unreadable file is reported, never fatal
+            tracks.append({"n": n, "file": path.name, "error": "unreadable_tags"})
+            continue
+        track = {"n": n, "file": path.name, "title": tags["title"], "artist": tags["artist"],
+                 "duration": tags["duration"], "cover": tags["cover"],
+                 "lyrics": path.with_suffix(".lrc").is_file()}
+        if tags["artists"]:
+            track["artists"] = tags["artists"]
+        if path.name in urls:
+            track["url"] = urls[path.name]
+        tracks.append(track)
+    first = next((read_tags(p) for p in audio_files(folder)[:1]), {}) if tracks and "error" not in tracks[0] else {}
+    return {"id": RELEASE_DIR.search(folder.name).group(1),
+            "artist": first.get("albumartist") or first.get("artist"), "album": first.get("album"),
+            "year": first.get("year"), "tracks": tracks}
+
+
+def read_library():
+    music = library_root() / "music"
+    return [read_release(d) for d in release_dirs(music)] if music.is_dir() and not music.is_symlink() else []
+
+
+def check_library(releases):
+    """Match names already in the library and refuse songs that are already there.
+
+    Same name apart from case/punctuation/accents: the library's spelling is used.
+    A close but different name is only reported, as a note on the release.
+    """
+    try:
+        existing = read_library()
+    except Failure:
+        return  # no library yet (e.g. offline validation on another machine)
+    artists, albums, songs, videos = {}, {}, set(), set()
+    for rel in existing:
+        if rel["artist"]:
+            artists.setdefault(norm(rel["artist"]), rel["artist"])
+            if rel["album"]:
+                albums.setdefault((norm(rel["artist"]), norm(rel["album"])), rel["album"])
+        for t in rel["tracks"]:
+            if t.get("title"):
+                songs.add((norm(rel["artist"]), norm(t["title"])))
+            if video_id(t.get("url")):
+                videos.add(video_id(t["url"]))
+    for release in releases:
+        notes = []
+        key = norm(release["artist"])
+        if key in artists and artists[key] != release["artist"]:
+            notes.append({"note": "artist_spelling_from_library", "given": release["artist"], "used": artists[key]})
+            release["artist"] = artists[key]
+        elif key not in artists:
+            close = [artists[k] for k in difflib.get_close_matches(key, list(artists), n=1, cutoff=0.8)]
+            if close:
+                notes.append({"note": "similar_artist_in_library", "given": release["artist"], "existing": close[0]})
+        album = albums.get((key, norm(release["album"])))
+        if album and album != release["album"]:
+            notes.append({"note": "album_spelling_from_library", "given": release["album"], "used": album})
+            release["album"] = album
+        for n, track in enumerate(release["tracks"], 1):
+            if (key, norm(track["title"])) in songs or video_id(track["url"]) in videos:
+                exc = Failure("already_in_library")
+                exc.item = track.get("song", n)
+                raise exc
+        if notes:
+            release["notes"] = notes
+
+
+def validate_changes(data, resolve=False):
+    """{"changes": [{release, track?, artist?, artists?, album?, title?, year?, artwork_url?, cover_from?}]}"""
+    keys = {"release", "track", "artist", "artists", "album", "title", "year", "artwork_url", "cover_from"}
+    if not isinstance(data, dict) or set(data) != {"changes"}:
+        raise Failure("invalid_retag_keys")
+    changes = data["changes"]
+    if not isinstance(changes, list) or not 1 <= len(changes) <= 500:
+        raise Failure("invalid_change_count")
+    hosts, out = allowed_hosts(), []
+    for n, change in enumerate(changes, 1):
+        try:
+            if not isinstance(change, dict) or set(change) - keys or len(set(change) - {"release", "track"}) == 0:
+                raise Failure("invalid_change_keys")
+            if not isinstance(change.get("release"), str) or not re.fullmatch(r"[0-9a-f]{32}", change["release"]):
+                raise Failure("invalid_release_id")
+            c = {"release": change["release"]}
+            if "track" in change:
+                if isinstance(change["track"], bool) or not isinstance(change["track"], int) or change["track"] < 1:
+                    raise Failure("invalid_track_number")
+                c["track"] = change["track"]
+            for key in ("artist", "album", "title"):
+                if key in change:
+                    c[key] = text(change[key], key)
+            if "artists" in change:
+                c["artists"] = artist_list(change["artists"])
+            if "year" in change:
+                c["year"] = None if change["year"] is None else release_year(change["year"])
+            for key in ("artwork_url", "cover_from"):
+                if key in change:
+                    c[key] = url(change[key], hosts, resolve)
+            if "artwork_url" in c and "cover_from" in c:
+                raise Failure("one_cover_source_only")
+        except Failure as exc:
+            exc.item = n
+            raise
+        out.append(c)
+    return out
+
+
+def validate_removal(data):
+    """{"releases": ["<release id>", ...]}"""
+    if not isinstance(data, dict) or set(data) != {"releases"}:
+        raise Failure("invalid_remove_keys")
+    ids = data["releases"]
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 100:
+        raise Failure("invalid_release_count")
+    for n, rid in enumerate(ids, 1):
+        if not isinstance(rid, str) or not re.fullmatch(r"[0-9a-f]{32}", rid):
+            exc = Failure("invalid_release_id")
+            exc.item = n
+            raise exc
+    return list(dict.fromkeys(ids))
+
+
+def find_release(music, rid):
+    found = [d for d in release_dirs(music) if d.name.endswith("--" + rid)]
+    if not found:
+        raise Failure("unknown_release", 65)
+    return found[0]
+
+
+def new_cover(change, work, env):
+    """Cover bytes from artwork_url, or from a video's thumbnail (cover_from), or None."""
+    if "artwork_url" in change:
+        return artwork(change, work, env)
+    run([*ytdlp_base(), "--no-playlist", "--skip-download", "--write-thumbnail",
+         "-o", "thumbnail:" + str(work / "thumb.%(ext)s"), "--", change["cover_from"]], work, env, timeout=120)
+    return source_thumbnail(work, env)
+
+
+def retag_file(path, fields, cover):
+    """Tag a copy, then replace the original in one rename: never a half-written file."""
+    temp = path.with_name(".retag-" + path.name)
+    try:
+        shutil.copyfile(path, temp)
+        write_tags(temp, fields, cover)
+        with temp.open("rb") as fp:
+            os.fsync(fp.fileno())
+        os.replace(temp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+
+
+def write_json(path, value):
+    temp = path.with_name("." + path.name + ".tmp")
+    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(temp, path)
+
+
+def change_fields(change, old):
+    """Tag fields for one file. A new main `artist` also replaces the old main artist
+    in the track artist, keeping featured artists."""
+    fields = {k: change[k] for k in ("title", "album", "year") if k in change}
+    if "artists" in change:
+        artists = change["artists"]
+        fields.update(artist=display_artist(artists), artists=artists if len(artists) > 1 else None)
+    if "artist" in change:
+        fields["albumartist"] = change["artist"]
+        if "artists" not in change:
+            main = old.get("albumartist") or old.get("artist")
+            if old.get("artists") and old["artists"][0] == main:
+                artists = [change["artist"], *old["artists"][1:]]
+                fields.update(artist=display_artist(artists), artists=artists)
+            elif not old.get("artist") or old["artist"] == main:
+                fields["artist"] = change["artist"]
+    return fields
+
+
+def retag(changes):
+    """Fix tags (and covers) of releases already in the library, without re-downloading."""
+    root = library_root()
+    music, staging = safe_dir(root / "music"), safe_dir(root / ".staging")
+    changed, failed, not_attempted = [], [], []
+    with library_lock(root):
+        for i, change in enumerate(changes, 1):
+            try:
+                folder = find_release(music, change["release"])
+                files = audio_files(folder)
+                if "track" in change and change["track"] > len(files):
+                    raise Failure("unknown_track", 65)
+                targets = [files[change["track"] - 1]] if "track" in change else files
+                if "title" in change and len(targets) != 1:
+                    raise Failure("title_needs_track", 65)
+                cover = None
+                if "artwork_url" in change or "cover_from" in change:
+                    with tempfile.TemporaryDirectory(prefix="retag-", dir=staging) as tmp:
+                        home = safe_dir(Path(tmp) / "home")
+                        env = {"PATH": os.environ["PATH"], "HOME": str(home), "XDG_CONFIG_HOME": str(home),
+                               "XDG_CACHE_HOME": str(home), "TMPDIR": tmp, "LANG": "C.UTF-8"}
+                        cover = new_cover(change, Path(tmp), env)
+                    if cover is None:
+                        raise Failure("cover_unavailable", 69)
+                for path in targets:
+                    retag_file(path, change_fields(change, read_tags(path)), cover)
+                with contextlib.suppress(OSError, ValueError):
+                    receipt = json.loads((folder / "provenance.json").read_text(encoding="utf-8"))
+                    receipt.setdefault("retagged", []).append({
+                        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "change": {k: v for k, v in change.items() if k != "release"}})
+                    write_json(folder / "provenance.json", receipt)
+                changed.append({"change": i, "release": change["release"], "files": len(targets)})
+            except Failure as exc:
+                failed.append({"change": i, "release": change["release"], "reason": str(exc)})
+                if exc.code not in CONTINUE_CODES:
+                    not_attempted = list(range(i + 1, len(changes) + 1))
+                    break
+    scan_status = scan() if changed else "not_needed"
+    emit("summary", ok=not failed and not not_attempted, changed=changed, failed=failed,
+         not_attempted=not_attempted, scan=scan_status)
+    return 0 if not failed and not not_attempted else 65
+
+
+def remove(ids):
+    """Move releases to <library>/.trash (same filesystem, not scanned). Nothing is deleted."""
+    root = library_root()
+    music, trash = safe_dir(root / "music"), safe_dir(root / ".trash")
+    removed, failed = [], []
+    with library_lock(root):
+        for rid in ids:
+            try:
+                folder = find_release(music, rid)
+                os.rename(folder, trash / folder.name)
+                removed.append(rid)
+            except Failure as exc:
+                failed.append({"release": rid, "reason": str(exc)})
+        if removed:
+            sync_tree(music)
+    scan_status = scan() if removed else "not_needed"
+    emit("summary", ok=not failed, removed=removed, failed=failed, scan=scan_status)
+    return 0 if not failed else 65
+
+
 def interrupted(signum, frame):
     raise Failure("interrupted", 128 + signum)
 
@@ -720,17 +1184,30 @@ def main():
     mode.add_argument("--validate", action="store_true", help="Validate JSON offline without downloads or filesystem writes")
     mode.add_argument("--lookup", action="store_true",
                       help='Search/inspect sources from {"search": [...], "urls": [...]}; downloads nothing')
+    mode.add_argument("--library", action="store_true", help="Print every release and its tags; reads no stdin")
+    mode.add_argument("--retag", action="store_true",
+                      help='Fix tags/covers from {"changes": [...]}; audio is not re-downloaded')
+    mode.add_argument("--remove", action="store_true",
+                      help='Move {"releases": [...]} to the library trash; nothing is deleted')
     args = parser.parse_args()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, interrupted)
     try:
+        if args.library:
+            emit("library", releases=read_library())
+            return 0
         raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
         if len(raw) > MAX_REQUEST:
             raise Failure("request_too_large")
         if args.lookup:
             lookup(validate_lookup(json.loads(raw), resolve=True))
             return 0
+        if args.retag:
+            return retag(validate_changes(json.loads(raw), resolve=True))
+        if args.remove:
+            return remove(validate_removal(json.loads(raw)))
         releases = parse(json.loads(raw), resolve=not args.validate)
+        check_library(releases)
         if args.validate:
             emit("valid", releases=[describe(r) for r in releases],
                  tracks=sum(len(r["tracks"]) for r in releases))

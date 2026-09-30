@@ -65,7 +65,9 @@ services:
       ND_LYRICSPRIORITY: .lrc,embedded
       ND_ENABLESHARING: "false"
       ND_ENABLEINSIGHTSCOLLECTOR: "false"
-      ND_DEEZER_ENABLED: "false"
+      # Artist pictures by artist name (no API key). Sends artist names to Deezer;
+      # set DEEZER_ENABLED=false in .env to keep Navidrome fully offline.
+      ND_DEEZER_ENABLED: ${DEEZER_ENABLED:-true}
       ND_LOGLEVEL: info
       # Consistent SQLite copies for scripts/backup.sh; the live .db is never copied directly.
       ND_BACKUP_PATH: /data/backup

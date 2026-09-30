@@ -54,9 +54,10 @@ TOOLS = [
         "function": {
             "name": "butler_lookup",
             "description": (
-                "Find sources before adding. Searches YouTube for each text in 'search' "
-                "(e.g. 'Daft Punk Get Lucky') and returns title, channel, duration and url "
-                "per result; for 'Artist - Topic' channels also clean artist/track names. "
+                "Find sources before adding. Searches YouTube Music, then YouTube, for each text "
+                "in 'search' (e.g. 'Daft Punk Get Lucky'). Each result has title, channel, duration, "
+                "url and a 'song' object with the names to tag: exact when names is 'release', "
+                "guessed from the video title when names is 'guessed'. "
                 "'urls' returns the same details for links the owner gave. Downloads nothing."
             ),
             "parameters": {
@@ -91,7 +92,10 @@ TOOLS = [
                                 "artist": {"type": "string"},
                                 "title": {"type": "string"},
                                 "url": {"type": "string", "description": "Exact HTTPS URL the owner gave."},
-                                "album": {"type": "string", "description": "Optional. Leave out for a single."},
+                                "album": {"type": "string", "description": "Optional: the result's song.album."},
+                                "artists": {"type": "array", "items": {"type": "string"},
+                                            "description": "Optional: the result's song.artists."},
+                                "year": {"type": "integer", "description": "Optional: the result's song.year."},
                                 "artwork_url": {"type": "string", "description": "Optional cover image URL."},
                             },
                             "required": ["artist", "title", "url"],
@@ -141,7 +145,7 @@ TOOLS = [
     },
 ]
 
-SONG_KEYS = {"artist", "title", "url", "album", "artwork_url"}
+SONG_KEYS = {"artist", "title", "url", "album", "artists", "year", "artwork_url"}
 
 
 class ToolError(Exception):
