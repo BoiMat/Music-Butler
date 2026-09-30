@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, or asks for a music backup.
+description: Add one or more songs or albums to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste or queue a Spotify playlist for the discovery job, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported, or asks for a music backup.
 ---
 
 # Music Butler
@@ -169,11 +169,46 @@ Meanings to tell the user:
 
 Say "added" only for songs listed under `added`.
 
+## Taste and playlists (for weekly discovery)
+
+A scheduled job adds new songs the user may like, starting from their taste.
+Use this when the user talks about their taste, not about specific songs to add now.
+
+**"I like X", "more songs like X", "older songs by X", "never suggest X",
+"I like 70s Italian pop"**: write `REPO/requests/seeds-<id>.json` and run
+`REPO/scripts/butler.sh seeds <id>`:
+
+```json
+{"artists": [{"name": "Mina", "note": "older songs"}, "Lucio Battisti"],
+ "songs": [{"artist": "Djo", "title": "End of Beginning"}],
+ "notes": "70s-80s Italian pop and modern indie; no trap",
+ "block_artists": ["Ava Max"]}
+```
+
+All keys are optional. Use only what the user said:
+- An artist the user likes goes in `artists`, not in `notes`.
+- `notes` is ONE short new sentence about taste in general (genres, eras,
+  languages, dislikes), in the user's words. It is ADDED to the earlier notes,
+  so never repeat them. Leave `notes` out if the message only names artists
+  or songs. Only if the user says to forget their old taste, add `"clear_notes": true`.
+- `block_artists` = never suggest them. `remove_artists` = stop using them as seeds.
+The last line of the output shows all current seeds; tell the user briefly.
+Do not add these songs now; the discovery job picks them up.
+
+**"Import my Spotify playlist"**: you cannot read Spotify. Tell the user to
+export the playlist as CSV at https://exportify.app (works for their own and
+followed playlists) and save it as `REPO/requests/spotify-<name>.csv`, where
+`<name>` is lowercase letters, digits and dashes. Then run
+`REPO/scripts/butler.sh queue <name>`. The output reports `queued`,
+`in_library`, `duplicate` and `queue` (songs waiting). The queued songs are
+imported by the daily bootstrap job, 25 a day. Do not add them yourself.
+
 ## Other commands
 
 ```
 REPO/scripts/butler.sh lookup <id>     # search / read links (Step 1), downloads nothing
 REPO/scripts/butler.sh status          # is Navidrome up + releases in the library
+REPO/scripts/butler.sh discover        # current taste seeds, playlist queue and discovery candidates
 REPO/scripts/butler.sh drives          # USB drives currently plugged in
 REPO/scripts/butler.sh backup <drive>  # encrypted backup to that drive
 ```

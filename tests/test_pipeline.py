@@ -475,6 +475,139 @@ class NetworkMocks(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)  # Cancellation is never retried.
 
 
+def radio_entry(vid, title, channel, duration=200):
+    return {"id": vid, "ie_key": "Youtube", "title": title, "channel": channel, "duration": duration}
+
+
+class Discovery(unittest.TestCase):
+    def test_song_key_ignores_versions_credits_and_spelling(self):
+        self.assertEqual(b.song_key("Daft Punk", "Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)"),
+                         b.song_key("Daft Punk", "Get Lucky"))
+        self.assertEqual(b.song_key("HUNTR/X, EJAE & AUDREY NUNA", "Golden"), b.song_key("Huntr X", "Golden"))
+        self.assertEqual(b.song_key("Shakira, Burna Boy", "Dai Dai - Live"), b.song_key("Shakira", "Dai Dai"))
+        self.assertNotEqual(b.song_key("Djo", "End of Beginning"), b.song_key("Djo", "Delete Ya"))
+
+    def test_radio_candidates_keep_songs_and_drop_noise(self):
+        entries = [radio_entry("AAAAAAAAAAA", "Takedown", "HUNTR/X - Topic"),
+                   radio_entry("BBBBBBBBBBB", "Taylor Swift - Shake It Off (Official Video)", "Taylor Swift"),
+                   radio_entry("CCCCCCCCCCC", "Gabriela", "KATSEYE"),
+                   radio_entry("DDDDDDDDDDD", "KPop Demon Hunters - Takedown (Fan Edit)", "Nick", 200),
+                   radio_entry("EEEEEEEEEEE", "Short clip", "X - Topic", 63),
+                   radio_entry("FFFFFFFFFFF", "Sia - Unstoppable (Official Video - Live from the Tour)", "Sia"),
+                   radio_entry("GGGGGGGGGGG", "Golden (Cover by Fun Squad)", "The Fun Squad"),
+                   radio_entry("HHHHHHHHHHH", "Soda Pop (Sped Up)", "Saja Boys - Topic"),
+                   radio_entry("IIIIIIIIIII", "Live Your Life", "T.I. - Topic")]
+        got = [c for c in map(b.radio_candidate, entries) if c]
+        self.assertEqual([(c["artist"], c["title"], c["names"]) for c in got],
+                         [("HUNTR/X", "Takedown", "release"), ("Taylor Swift", "Shake It Off", "guessed"),
+                          ("KATSEYE", "Gabriela", "guessed"), ("T.I.", "Live Your Life", "release")])
+        self.assertEqual(got[0]["url"], "https://www.youtube.com/watch?v=AAAAAAAAAAA")
+
+    def test_radio_reads_the_songs_radio(self):
+        with patch.object(b, "capture", return_value=[radio_entry("AAAAAAAAAAA", "Takedown", "HUNTR/X - Topic")]) as cap:
+            self.assertEqual(len(b.radio("9_bTl2vvYQg", "/tmp", {})), 1)
+        argv = cap.call_args.args[0]
+        self.assertEqual(argv[-2:], ["--", "https://www.youtube.com/watch?v=9_bTl2vvYQg&list=RDAMVM9_bTl2vvYQg"])
+        self.assertIn("--flat-playlist", argv)
+
+    def test_real_ytdlp_parser_accepts_radio_flags(self):
+        import yt_dlp
+        with patch.object(b, "capture", side_effect=lambda argv, cwd, env: yt_dlp.parse_options(argv[1:]) and []):
+            b.radio("9_bTl2vvYQg", "/tmp", {})
+            b.first_song("Lucio Battisti", "/tmp", {})
+
+    def test_score_ranks_caps_and_skips(self):
+        def c(artist, title, vid):
+            return {"artist": artist, "title": title, "url": "https://www.youtube.com/watch?v=" + vid,
+                    "duration": 200, "names": "release"}
+        loved, liked = {"name": "Loved", "weight": 3}, {"name": "Liked", "weight": 1}
+        radios = [(loved, [c("A", "One", "AAAAAAAAAAA"), c("A", "Two", "BBBBBBBBBBB"), c("A", "Three", "CCCCCCCCCCC"),
+                           c("Known", "Song", "DDDDDDDDDDD"), c("Nope", "X", "EEEEEEEEEEE"), c("Seen", "Y", "FFFFFFFFFFF")]),
+                  (liked, [c("B", "Both", "GGGGGGGGGGG"), c("A", "Two (Radio Edit)", "HHHHHHHHHHH")])]
+        ranked = b.score(radios, {b.song_key("Known", "Song")}, {"FFFFFFFFFFF"}, {b.norm("Nope")})
+        self.assertEqual([(r["artist"], r["title"]) for r in ranked], [("A", "Two"), ("A", "One"), ("B", "Both")])
+        titles = {b.norm("Both"): {b.norm("B.")}, b.norm("One"): {b.norm("Someone else")}}
+        self.assertEqual([r["title"] for r in b.score(radios, set(), set(), set(), titles)], ["Two", "One", "Song", "X", "Y"])
+        self.assertEqual(ranked[0]["because"], ["Loved", "Liked"])
+        self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+
+    def test_pick_seeds_moves_from_user_seeds_to_listening(self):
+        users = [{"name": f"user{n}", "weight": 2} for n in range(3)]
+        weak = [{"name": f"lib{n}", "weight": 1} for n in range(20)]
+        chosen = b.pick_seeds(weak, users, b.random.Random(1))
+        self.assertEqual(len(chosen), b.MAX_RADIO_SEEDS)
+        self.assertEqual({s["name"] for s in chosen[:3]}, {"user0", "user1", "user2"})
+        strong = [{"name": f"star{n}", "weight": 3} for n in range(b.MAX_RADIO_SEEDS)]
+        chosen = b.pick_seeds(strong + weak, users, b.random.Random(1))
+        self.assertTrue(all(s["name"].startswith("star") for s in chosen[:b.TOP_SEEDS]))
+
+    def test_parse_playlist_exportify_and_other_csvs(self):
+        exportify = ("﻿Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms)\n"
+                     "spotify:track:1,Emozioni,Emozioni,Lucio Battisti,1970-01-01,245000\n"
+                     "spotify:track:2,\"Get Lucky (feat. Pharrell Williams)\",Random Access Memories,"
+                     "\"Daft Punk;Pharrell Williams\",2013,369000\n"
+                     "spotify:track:3,,,,,\n").encode()
+        rows = b.parse_playlist(exportify)
+        self.assertEqual(rows[0], {"artist": "Lucio Battisti", "title": "Emozioni", "search": "Lucio Battisti Emozioni",
+                                   "album": "Emozioni", "year": 1970, "duration": 245})
+        self.assertEqual((rows[1]["artists"], rows[1]["search"]), (["Daft Punk", "Pharrell Williams"], "Daft Punk Get Lucky"))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(b.parse_playlist(b"Title,Artist\nSong,Someone, Else\n")[0]["artist"], "Someone")
+        for bad in (b"Name\nx\n", b"Track Name,Artist Name(s)\n", b"\xff\xfe"):
+            with self.subTest(bad=bad), self.assertRaises((b.Failure, UnicodeError)):
+                b.parse_playlist(bad)
+
+    def test_interleave_spreads_playlists(self):
+        self.assertEqual(b.interleave(["a1", "a2", "a3", "a4"], ["b1", "b2"]), ["a1", "b1", "a2", "a3", "b2", "a4"])
+        self.assertEqual(b.interleave([], ["b1"]), ["b1"])
+        self.assertEqual(b.interleave(["a1"], []), ["a1"])
+
+    def test_validate_seeds(self):
+        seeds = b.validate_seeds({"artists": ["Lucio Battisti", {"name": "Mina", "note": "older songs"}],
+                                  "songs": [{"artist": "Djo", "title": "End of Beginning"}], "notes": "70s Italian pop"})
+        self.assertEqual(seeds["artists"], [{"name": "Lucio Battisti"}, {"name": "Mina", "note": "older songs"}])
+        for bad in [{}, {"extra": 1}, {"artists": [{"name": "x", "url": "y"}]}, {"songs": [{"artist": "x"}]},
+                    {"block_artists": "x"}, {"artists": ["x\ny"]}, {"clear_notes": "yes"}]:
+            with self.subTest(bad=bad), self.assertRaises(b.Failure):
+                b.validate_seeds(bad)
+
+    def test_track_stats_and_stale(self):
+        releases = [{"id": "a" * 32, "artist": "A", "album": "One", "origin": "discovery", "added": "2026-08-01T00:00:00+00:00",
+                     "tracks": [{"n": 1, "title": "One", "duration": 200}]},
+                    {"id": "b" * 32, "artist": "B", "album": "Two", "origin": "discovery", "added": "2026-08-01T00:00:00+00:00",
+                     "tracks": [{"n": 1, "title": "Two", "duration": 180}]},
+                    {"id": "c" * 32, "artist": "C", "album": "Three", "origin": "discovery", "added": "2026-09-25T00:00:00+00:00",
+                     "tracks": [{"n": 1, "title": "Three", "duration": 180}]},
+                    {"id": "d" * 32, "artist": "D", "album": "Four", "origin": "request", "added": "2026-01-01T00:00:00+00:00",
+                     "tracks": [{"n": 1, "title": "Four", "duration": 180}]}]
+        songs = [{"title": "Two", "album": "Two", "duration": 181, "playCount": 3},
+                 {"title": "One", "album": "One", "duration": 200, "starred": None},
+                 {"title": "Four", "album": "Four", "duration": 180, "userRating": 5},
+                 {"title": "Unknown", "album": "X", "playCount": 9}]
+        stats = b.track_stats(releases, songs)
+        self.assertEqual(stats[("b" * 32, 1)], {"plays": 3, "starred": False})
+        self.assertTrue(stats[("d" * 32, 1)]["starred"])
+        today = b.datetime.datetime(2026, 9, 30, tzinfo=b.datetime.timezone.utc)
+        self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32])
+        seeds = b.library_seeds([{**r, "tracks": [{**r["tracks"][0], "url": f"https://youtu.be/{r['id'][0] * 11}"}]}
+                                 for r in releases], stats)
+        self.assertEqual([(s["name"], s["weight"]) for s in seeds], [("B - Two", 2), ("D - Four", 3)])
+
+    def test_listening_pages_and_fails_soft(self):
+        page = {"status": "ok", "searchResult3": {"song": [{"title": "T", "album": "A", "playCount": 1}]}}
+        with patch.object(b, "subsonic", return_value=page) as api:
+            self.assertEqual(b.listening([{"id": "a" * 32, "album": "A", "tracks": [{"n": 1, "title": "T"}]}]),
+                             {("a" * 32, 1): {"plays": 1, "starred": False}})
+        self.assertEqual(api.call_args.args[:2], ("search3", {"query": "", "songCount": 500, "songOffset": 0,
+                                                              "artistCount": 0, "albumCount": 0}))
+        with patch.object(b, "subsonic", return_value=None):
+            self.assertIsNone(b.listening([]))
+        with patch.object(b, "subsonic", side_effect=b.Failure("navidrome_api_error", 69)):
+            self.assertIsNone(b.listening([]))
+        with patch.object(b, "subsonic", side_effect=b.Failure("interrupted", 143)), self.assertRaises(b.Failure):
+            b.listening([])
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required for real encoder tests")
 class Pipeline(unittest.TestCase):
     def setUp(self):
@@ -724,6 +857,94 @@ class Pipeline(unittest.TestCase):
                 self.assertEqual(MP3(dest).tags.getall("APIC")[0].data, cover)
             else:
                 self.assertEqual(FLAC(dest).pictures[0].data, cover)
+
+    def test_bulk_origin_tags_skips_and_library_fields(self):
+        from mutagen.mp3 import MP3
+        from mutagen.flac import FLAC
+        (mp3_result, flac_result), _ = self.add([
+            {"artist": "A", "title": "Found", "url": "https://youtu.be/AAAAAAAAAAA", "origin": "discovery"},
+            {"artist": "B", "title": "Liked", "url": "https://youtu.be/BBBBBBBBBBB", "origin": "playlist"}])
+        self.assertEqual(str(MP3(next(Path(mp3_result["path"]).glob("*.mp3"))).tags["COMM::eng"]), "music-butler:discovery")
+        (req_result,), _ = self.add([{"artist": "C", "title": "Asked", "url": "https://youtu.be/CCCCCCCCCCC"}], fmt="flac")
+        self.assertNotIn("comment", FLAC(next(Path(req_result["path"]).glob("*.flac"))))
+        self.assertEqual(b.read_tags(next(Path(mp3_result["path"]).glob("*.mp3")))["comment"], "music-butler:discovery")
+        lib = {r["artist"]: r for r in b.read_library()}
+        self.assertEqual({a: r["origin"] for a, r in lib.items()}, {"A": "discovery", "B": "playlist", "C": "request"})
+        self.assertTrue(lib["A"]["added"].startswith("20"))
+        with self.assertRaises(b.Failure):
+            b.parse({"songs": [{"artist": "A", "title": "x", "url": "https://youtu.be/DDDDDDDDDDD", "origin": "robot"}]})
+        # A bulk add skips songs already there and keeps the rest.
+        releases = b.parse({"origin": "discovery", "songs": [
+            {"artist": "a", "title": "found", "url": "https://youtu.be/EEEEEEEEEEE"},
+            {"artist": "New", "title": "Song", "url": "https://youtu.be/FFFFFFFFFFF"}]})
+        self.assertEqual(b.check_library(releases), [{"artist": "A", "title": "found", "reason": "already_in_library"}])
+        self.assertEqual([r["artist"] for r in releases], ["New"])
+        with patch.object(b, "ingest", return_value={"scan": "scheduled", "tracks": [], "path": "/p"}), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            b.import_all(releases, [{"artist": "A", "title": "found", "reason": "already_in_library"}])
+        self.assertEqual(json.loads(out.getvalue())["skipped"][0]["title"], "found")
+
+    def test_seeds_queue_discover_and_forget(self):
+        (liked, found), _ = self.add([
+            {"artist": "Known", "title": "Liked", "url": "https://youtu.be/AAAAAAAAAAA"},
+            {"artist": "Old", "title": "Found", "url": "https://youtu.be/BBBBBBBBBBB", "origin": "discovery"}])
+        found_id = Path(found["path"]).name[-32:]
+        receipt = Path(found["path"]) / "provenance.json"
+        data = json.loads(receipt.read_text())
+        data["created"] = "2026-01-01T00:00:00+00:00"
+        receipt.write_text(json.dumps(data))
+
+        def run(fn, *args):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(fn(*args), 0)
+            return json.loads(out.getvalue().splitlines()[-1])
+        seeds = run(b.merge_seeds, b.validate_seeds({"artists": [{"name": "Mina", "note": "older songs"}, "Blocked"],
+                                                     "notes": "Italian classics"}))
+        seeds = run(b.merge_seeds, b.validate_seeds({"block_artists": ["Blocked"], "notes": "No trap."}))
+        self.assertEqual(([a["name"] for a in seeds["artists"]], seeds["block_artists"]), (["Mina"], ["Blocked"]))
+        self.assertEqual(seeds["notes"], "Italian classics\nNo trap.")  # notes add up, never replace
+        seeds = run(b.merge_seeds, b.validate_seeds({"notes": "no trap"}))
+        self.assertEqual(seeds["notes"], "Italian classics\nNo trap.")
+        seeds = run(b.merge_seeds, b.validate_seeds({"clear_notes": True, "notes": "Italian classics"}))
+        self.assertEqual(seeds["notes"], "Italian classics")
+        csv = b"Track Name,Artist Name(s),Duration (ms)\nLiked,Known,200000\nQueued,Q,180000\nQueued,Q,180000\n"
+        self.assertEqual(run(b.queue_playlist, csv), {"event": "queued", "queued": 1, "in_library": 1, "duplicate": 1,
+                                                       "removed_before": 0, "queue": 1})
+
+        radio = [radio_entry("CCCCCCCCCCC", "Fresh", "New - Topic"), radio_entry("AAAAAAAAAAA", "Liked", "Known - Topic"),
+                 radio_entry("DDDDDDDDDDD", "Queued", "Q - Topic"), radio_entry("EEEEEEEEEEE", "Nope", "Blocked - Topic")]
+        def fake_capture(argv, cwd, env):
+            if "music.youtube.com/search" in argv[-1]:
+                self.assertIn("Mina", urllib.parse.unquote(argv[-1]))
+                return [radio_entry("MMMMMMMMMMM", "Grande grande grande", "Mina - Topic")]
+            return radio
+        songs = [{"title": "Liked", "album": "Liked", "duration": 2, "playCount": 5}]
+        with patch.object(b, "capture", side_effect=fake_capture), \
+                patch.object(b, "subsonic", return_value={"status": "ok", "searchResult3": {"song": songs}}):
+            event = run(b.discover)
+        self.assertEqual((event["library_songs"], event["listening"], event["queue_total"]), (2, "ok", 1))
+        self.assertEqual(event["queue"], [{"artist": "Q", "title": "Queued", "duration": 180, "search": "Q Queued"}])
+        self.assertEqual([(c["artist"], c["title"], c["new_artist"]) for c in event["candidates"]], [("New", "Fresh", True)])
+        self.assertEqual(set(event["candidates"][0]["because"]), {"Known - Liked", "Mina"})
+        self.assertEqual(event["taste"]["artists"], [{"name": "Mina", "note": "older songs"}])
+        self.assertEqual([s["id"] for s in event["stale"]], [found_id])
+        state = self.root / "discovery"
+        self.assertEqual(json.loads((state / "seeds.json").read_text())["artists"][0]["video"], "MMMMMMMMMMM")
+        self.assertEqual(json.loads((state / "queue.json").read_text())[0]["offered"], 1)
+        for name in b.PLAYLISTS:
+            self.assertEqual(json.loads((self.root / "music" / name).read_text())["all"][0],
+                             {"contains": {"comment": "music-butler:discovery"}})
+
+        # Removed songs are remembered and never offered again; no Navidrome means no pruning.
+        with patch.object(b, "scan", return_value="requested"), contextlib.redirect_stdout(io.StringIO()):
+            b.remove([found_id])
+        history = json.loads((state / "history.json").read_text())
+        self.assertEqual(history[b.song_key("Old", "Found")]["status"], "removed")
+        radio.append(radio_entry("BBBBBBBBBBB", "Found", "Old - Topic"))
+        with patch.object(b, "capture", side_effect=fake_capture), patch.object(b, "subsonic", return_value=None):
+            event = run(b.discover)
+        self.assertEqual([c["title"] for c in event["candidates"]], ["Fresh"])
+        self.assertEqual((event["listening"], event["stale"]), ("unavailable", []))
 
 
 if __name__ == "__main__":

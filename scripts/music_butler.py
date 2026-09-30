@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import secrets
 import shutil
@@ -33,7 +34,9 @@ DEFAULT_HOSTS = ("archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,y
                  "m.youtube.com,music.youtube.com")
 YOUTUBE_HOSTS = {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
 MAX_SONGS = 100
-SONG_KEYS = {"artist", "title", "url", "album", "artists", "year", "artwork_url"}
+SONG_KEYS = {"artist", "title", "url", "album", "artists", "year", "artwork_url", "origin"}
+# Why a release was added: asked for, from a playlist export, from a taste seed, or discovered.
+ORIGINS = ("request", "playlist", "seed", "discovery")
 # Batch imports continue past these per-release failures; anything else stops the batch.
 CONTINUE_CODES = {65, 69}
 
@@ -150,9 +153,10 @@ def validate_songs(data, resolve=False):
     Songs that share artist and album become one album release, in list order.
     A song without an album is its own single, named after the song.
     """
-    if set(data) - {"songs", "format", "quality"}:
+    if set(data) - {"songs", "format", "quality", "origin"}:
         raise Failure("invalid_request_keys")
     fmt, quality = encoding(data)
+    default_origin = origin(data.get("origin", "request"))
     songs = data.get("songs")
     if not isinstance(songs, list) or not 1 <= len(songs) <= MAX_SONGS:
         raise Failure("invalid_song_count")
@@ -175,17 +179,24 @@ def validate_songs(data, resolve=False):
                 t["artists"] = artist_list(song["artists"])
             if not blank(song.get("year")):
                 t["year"] = release_year(song["year"])
+            song_origin = origin(song.get("origin", default_origin))
         except Failure as exc:
             exc.item = n
             raise
         key = ("album", artist.casefold(), album.casefold()) if album else ("single", n)
-        release = releases.setdefault(key, {"artist": artist, "album": album or title,
+        release = releases.setdefault(key, {"artist": artist, "album": album or title, "origin": song_origin,
                                             "format": fmt, "quality": quality, "tracks": []})
         release["tracks"].append(t)
     out = list(releases.values())
     for release in out:
         release["kind"] = "song" if len(release["tracks"]) == 1 else "album"
     return out
+
+
+def origin(value):
+    if value not in ORIGINS:
+        raise Failure("invalid_origin")
+    return value
 
 
 def parse(data, resolve=False):
@@ -503,14 +514,14 @@ def lookup(query):
 ID3_FRAMES = {"title": "TIT2", "artist": "TPE1", "albumartist": "TPE2", "album": "TALB",
               "year": "TDRC", "tracknumber": "TRCK"}
 VORBIS_KEYS = {"title": "title", "artist": "artist", "albumartist": "albumartist", "album": "album",
-               "year": "date", "artists": "artists"}
+               "year": "date", "artists": "artists", "comment": "comment"}
 
 
 def write_tags(path, fields, cover=None, fresh=False):
     """Set the given tags (None removes one); keep the rest unless fresh.
 
     fields: title, artist (display text), artists (list, multi-valued ARTISTS tag),
-    albumartist, album, year, tracknumber ((n, total)). ID3v2.4 keeps multi-valued
+    albumartist, album, year, tracknumber ((n, total)), comment. ID3v2.4 keeps multi-valued
     frames separate; v2.3 would join them with "/", which splits "HUNTR/X".
     """
     from mutagen import id3
@@ -520,6 +531,12 @@ def write_tags(path, fields, cover=None, fresh=False):
         audio = MP3(path)
         tags = id3.ID3() if fresh or audio.tags is None else audio.tags
         for key, value in fields.items():
+            if key == "comment":
+                for frame in [k for k in tags.keys() if k.startswith("COMM")]:
+                    del tags[frame]
+                if value is not None:
+                    tags.add(id3.COMM(encoding=3, lang="eng", desc="", text=[value]))
+                continue
             frame = "TXXX:ARTISTS" if key == "artists" else ID3_FRAMES[key]
             tags.delall(frame)
             if value is None:
@@ -569,6 +586,8 @@ def read_tags(path):
         out = {k: first(f) for k, f in ID3_FRAMES.items() if k != "tracknumber"}
         artists = tags.get("TXXX:ARTISTS")
         out["artists"] = [str(a) for a in artists.text] if artists else None
+        comments = [f for k, f in tags.items() if k.startswith("COMM") and f.text]
+        out["comment"] = str(comments[0].text[0]) if comments else None
         out["cover"] = bool(tags and tags.getall("APIC"))
     else:
         audio = FLAC(path)
@@ -579,11 +598,17 @@ def read_tags(path):
     return out
 
 
+def origin_comment(value):
+    """Navidrome smart playlists find discovered songs by this comment tag."""
+    return None if value == "request" else "music-butler:" + value
+
+
 def tag_audio(path, request, track, number, total, cover):
     artists = track.get("artists") or [request["artist"]]
     fields = {"title": track["title"], "artist": display_artist(artists),
               "artists": artists if len(artists) > 1 else None, "albumartist": request["artist"],
-              "album": request["album"], "year": track.get("year"), "tracknumber": (number, total)}
+              "album": request["album"], "year": track.get("year"), "tracknumber": (number, total),
+              "comment": origin_comment(request.get("origin", "request"))}
     duration = write_tags(path, fields, cover, fresh=True)
     if not math.isfinite(duration) or not 1 <= duration <= 3600:
         raise Failure("unsupported_audio_duration", 69)
@@ -707,31 +732,42 @@ class Lyrics:
         return None
 
 
-def scan():
+def subsonic(endpoint, params=None, limit=MAX_RESPONSE):
+    """One authenticated Subsonic API call to Navidrome: the "subsonic-response" dict,
+    or None when no Navidrome user is configured."""
     base = os.environ.get("NAVIDROME_URL", "").rstrip("/")
     user = os.environ.get("NAVIDROME_USER", "")
     password_file = os.environ.get("NAVIDROME_PASSWORD_FILE", "")
     if not base or not user or not password_file:
-        return "scheduled"
+        return None
+    p = urllib.parse.urlsplit(base)
+    if (p.scheme not in ("http", "https") or not p.hostname or p.username or p.password or p.query or p.fragment
+            or (p.scheme == "http" and p.hostname not in {"navidrome", "localhost", "127.0.0.1", "::1"})):
+        raise Failure("unsafe_scan_url")
+    secret = Path(password_file)
+    if secret.is_symlink() or not secret.is_file() or secret.stat().st_mode & 0o077:
+        raise Failure("unsafe_scan_secret_permissions")
+    password = secret.read_text(encoding="utf-8").rstrip("\r\n")
+    if not password or len(password) > 4096:
+        raise Failure("invalid_scan_secret")
+    salt = secrets.token_hex(16)
+    token = hashlib.md5((password + salt).encode("utf-8")).hexdigest()  # Required by Subsonic, not password storage.
+    body = urllib.parse.urlencode({"u": user, "t": token, "s": salt, "v": "1.16.1",
+                                  "c": "music-butler", "f": "json", **(params or {})}).encode()
+    result = json.loads(fetch(base + "/rest/" + endpoint + ".view", data=body, limit=limit,
+                             headers={"Content-Type": "application/x-www-form-urlencoded"}))
+    response = result.get("subsonic-response", {})
+    if response.get("status") != "ok":
+        raise Failure("navidrome_api_error", 69)
+    return response
+
+
+def scan():
     try:
-        p = urllib.parse.urlsplit(base)
-        if (p.scheme not in ("http", "https") or not p.hostname or p.username or p.password or p.query or p.fragment
-                or (p.scheme == "http" and p.hostname not in {"navidrome", "localhost", "127.0.0.1", "::1"})):
-            raise Failure("unsafe_scan_url")
-        secret = Path(password_file)
-        if secret.is_symlink() or not secret.is_file() or secret.stat().st_mode & 0o077:
-            raise Failure("unsafe_scan_secret_permissions")
-        password = secret.read_text(encoding="utf-8").rstrip("\r\n")
-        if not password or len(password) > 4096:
-            raise Failure("invalid_scan_secret")
-        salt = secrets.token_hex(16)
-        token = hashlib.md5((password + salt).encode("utf-8")).hexdigest()  # Required by Subsonic, not password storage.
-        body = urllib.parse.urlencode({"u": user, "t": token, "s": salt, "v": "1.16.1",
-                                      "c": "music-butler", "f": "json"}).encode()
-        result = json.loads(fetch(base + "/rest/startScan.view", data=body,
-                                 headers={"Content-Type": "application/x-www-form-urlencoded"}))
-        response = result.get("subsonic-response", {})
-        if response.get("status") != "ok" or not isinstance(response.get("scanStatus"), dict):
+        response = subsonic("startScan")
+        if response is None:
+            return "scheduled"
+        if not isinstance(response.get("scanStatus"), dict):
             return "scheduled_after_scan_error"
         return "requested"
     except (OSError, ValueError, AttributeError, Failure, urllib.error.URLError) as exc:
@@ -886,9 +922,11 @@ def audio_files(folder):
 
 def read_release(folder):
     """Tags are the truth (they may have been retagged); provenance adds the source URLs."""
-    urls = {}
-    with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+    urls, origin, added = {}, "request", None
+    with contextlib.suppress(OSError, ValueError, KeyError, TypeError, AttributeError):
         receipt = json.loads((folder / "provenance.json").read_text(encoding="utf-8"))
+        added = receipt.get("created")
+        origin = receipt["request"].get("origin") if receipt["request"].get("origin") in ORIGINS else "request"
         for source, done in zip(receipt["request"]["tracks"], receipt["tracks"]):
             urls[done["file"]] = source["url"]
     tracks = []
@@ -909,7 +947,7 @@ def read_release(folder):
     first = next((read_tags(p) for p in audio_files(folder)[:1]), {}) if tracks and "error" not in tracks[0] else {}
     return {"id": RELEASE_DIR.search(folder.name).group(1),
             "artist": first.get("albumartist") or first.get("artist"), "album": first.get("album"),
-            "year": first.get("year"), "tracks": tracks}
+            "year": first.get("year"), "origin": origin, "added": added, "tracks": tracks}
 
 
 def read_library():
@@ -917,28 +955,39 @@ def read_library():
     return [read_release(d) for d in release_dirs(music)] if music.is_dir() and not music.is_symlink() else []
 
 
+def library_index(existing):
+    """Names and sources already in the library, as comparison keys."""
+    idx = {"artists": {}, "albums": {}, "songs": set(), "videos": set(), "keys": set(), "titles": {}}
+    for rel in existing:
+        if rel["artist"]:
+            idx["artists"].setdefault(norm(rel["artist"]), rel["artist"])
+            if rel["album"]:
+                idx["albums"].setdefault((norm(rel["artist"]), norm(rel["album"])), rel["album"])
+        for t in rel["tracks"]:
+            if t.get("title"):
+                idx["songs"].add((norm(rel["artist"]), norm(t["title"])))
+                for artist in {rel["artist"], *(t.get("artists") or [])[:1]} - {None}:
+                    idx["keys"].add(song_key(artist, t["title"]))
+                    idx["titles"].setdefault(norm(base_title(t["title"])), set()).add(norm(main_artist(artist)))
+            if video_id(t.get("url")):
+                idx["videos"].add(video_id(t["url"]))
+    return idx
+
+
 def check_library(releases):
     """Match names already in the library and refuse songs that are already there.
 
     Same name apart from case/punctuation/accents: the library's spelling is used.
     A close but different name is only reported, as a note on the release.
+    Bulk adds (origin other than "request") skip a song already there instead of
+    refusing the whole request; the skipped songs are returned.
     """
     try:
-        existing = read_library()
+        idx = library_index(read_library())
     except Failure:
-        return  # no library yet (e.g. offline validation on another machine)
-    artists, albums, songs, videos = {}, {}, set(), set()
-    for rel in existing:
-        if rel["artist"]:
-            artists.setdefault(norm(rel["artist"]), rel["artist"])
-            if rel["album"]:
-                albums.setdefault((norm(rel["artist"]), norm(rel["album"])), rel["album"])
-        for t in rel["tracks"]:
-            if t.get("title"):
-                songs.add((norm(rel["artist"]), norm(t["title"])))
-            if video_id(t.get("url")):
-                videos.add(video_id(t["url"]))
-    for release in releases:
+        return []  # no library yet (e.g. offline validation on another machine)
+    artists, albums, skipped = idx["artists"], idx["albums"], []
+    for release in list(releases):
         notes = []
         key = norm(release["artist"])
         if key in artists and artists[key] != release["artist"]:
@@ -952,13 +1001,24 @@ def check_library(releases):
         if album and album != release["album"]:
             notes.append({"note": "album_spelling_from_library", "given": release["album"], "used": album})
             release["album"] = album
+        kept = []
         for n, track in enumerate(release["tracks"], 1):
-            if (key, norm(track["title"])) in songs or video_id(track["url"]) in videos:
-                exc = Failure("already_in_library")
-                exc.item = track.get("song", n)
-                raise exc
+            if (key, norm(track["title"])) in idx["songs"] or video_id(track["url"]) in idx["videos"]:
+                if release.get("origin", "request") == "request":
+                    exc = Failure("already_in_library")
+                    exc.item = track.get("song", n)
+                    raise exc
+                skipped.append({"artist": release["artist"], "title": track["title"], "reason": "already_in_library"})
+            else:
+                kept.append(track)
+        if not kept:
+            releases.remove(release)
+            continue
+        if len(kept) != len(release["tracks"]):
+            release["tracks"], release["kind"] = kept, "song" if len(kept) == 1 else "album"
         if notes:
             release["notes"] = notes
+    return skipped
 
 
 def validate_changes(data, resolve=False):
@@ -1123,8 +1183,11 @@ def remove(ids):
         for rid in ids:
             try:
                 folder = find_release(music, rid)
+                gone = read_release(folder)
                 os.rename(folder, trash / folder.name)
                 removed.append(rid)
+                with contextlib.suppress(Failure, OSError):
+                    forget(root, gone)
             except Failure as exc:
                 failed.append({"release": rid, "reason": str(exc)})
         if removed:
@@ -1134,11 +1197,505 @@ def remove(ids):
     return 0 if not failed else 65
 
 
+# ---- Discovery: taste seeds, playlist queue, YouTube radio candidates ----
+
+RADIO_ITEMS = 25  # songs read from one YouTube Music radio
+MAX_RADIO_SEEDS = 12  # radios per discover run (one yt-dlp call each)
+TOP_SEEDS = 8  # of those, the best-loved seeds; the rest are picked at random for variety
+MAX_CANDIDATES = 40
+MAX_QUEUE_OUT = 30
+PER_ARTIST = 2
+STALE_DAYS = 28
+PASS_AFTER = 4  # candidates offered this often without being added are dropped
+MAX_QUEUE = 5000
+MAX_PLAYLIST = 8 * MAX_REQUEST
+MIN_SONG, MAX_SONG = 90, 600  # seconds; shorter clips and hour-long mixes are not songs
+NOISE = re.compile(r"\b(?:covers?|covered|fan[ -]?(?:made|edit)|sped[ -]?up|slowed|nightcore|8d|karaoke|instrumental"
+                   r"|reaction|mashup|hybrid|tutorial|lesson|amv|parody|\d+\s*hours?|1h|loop(?:ed)?)\b"
+                   r"|\blive\s+(?:at|from|in|on|session|performance|version)\b|[(\[|]\s*live\b|\blive\s*[)\]]", re.I)
+MAIN_ARTIST = re.compile(r"\s*(?:,|;|&|\bx\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\band\b|\bwith\b|\bvs\.?)\s*", re.I)
+PLAYLISTS = {  # Navidrome smart playlists, kept in the library's music folder
+    "Discover Weekly.nsp": {
+        "name": "Discover Weekly", "comment": "Songs Music Butler discovered in the last week",
+        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": 7}}],
+        "sort": "dateadded", "order": "desc", "limit": 100},
+    "Discoveries to rate.nsp": {
+        "name": "Discoveries to rate",
+        "comment": "Discovered songs you have not played or starred yet. Unplayed, unstarred ones leave after 4 weeks",
+        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"is": {"playcount": 0}}, {"is": {"loved": False}}],
+        "sort": "dateadded", "order": "desc", "limit": 200},
+}
+
+
+def main_artist(value):
+    """"Shakira, Burna Boy" -> "Shakira"; used only for comparison keys."""
+    return MAIN_ARTIST.split(value or "")[0].strip() or (value or "")
+
+
+def base_title(value):
+    """"Get Lucky (Radio Edit - feat. X)" -> "Get Lucky": versions and credits removed."""
+    value = re.sub(r"\s*[(\[【][^)\]】]*[)\]】]", "", value or "")
+    value = BARE_FEAT.sub("", re.split(r"\s+[-–—]\s+", value, maxsplit=1)[0])
+    return value.strip() or (value or "")
+
+
+def song_key(artist, title):
+    return norm(main_artist(artist)) + "|" + norm(base_title(title))
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def discovery_path(root, name):
+    return safe_dir(root / "discovery") / name
+
+
+def read_state(root, name, default):
+    path = discovery_path(root, name)
+    if path.is_symlink():
+        raise Failure("symlink_storage_refused", 73)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as exc:
+        raise Failure("discovery_state_unreadable", 73) from exc
+    return value if isinstance(value, type(default)) else default
+
+
+def forget(root, release):
+    """Remember a removed release so discovery never suggests it again."""
+    history = read_state(root, "history.json", {})
+    for t in release["tracks"]:
+        if not t.get("title"):
+            continue
+        artist = (t.get("artists") or [release["artist"] or t.get("artist") or ""])[0]
+        history[song_key(artist, t["title"])] = {"artist": artist, "title": t["title"], "status": "removed",
+                                                 "video": video_id(t.get("url")), "at": now().isoformat()}
+    write_json(discovery_path(root, "history.json"), history)
+
+
+def blocked(history):
+    """Song keys and video ids discovery must not offer again."""
+    keys, videos = set(), set()
+    for key, rec in history.items():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("status") in ("removed", "not_found") or rec.get("offered", 0) >= PASS_AFTER:
+            keys.add(key)
+            if isinstance(rec.get("video"), str):
+                videos.add(rec["video"])
+    return keys, videos
+
+
+def validate_seeds(data):
+    """{"artists": ["Name" | {"name", "note"}], "songs": [{"artist", "title"}], "notes": "...",
+    "clear_notes": true, "block_artists": [...], "remove_artists": [...]}"""
+    keys = {"artists", "songs", "notes", "clear_notes", "block_artists", "remove_artists"}
+    if not isinstance(data, dict) or not data or set(data) - keys:
+        raise Failure("invalid_seed_keys")
+    out = {"artists": [], "songs": [], "block_artists": [], "remove_artists": []}
+    for n, item in enumerate(data.get("artists", []), 1):
+        item = {"name": item} if isinstance(item, str) else item
+        if not isinstance(item, dict) or set(item) - {"name", "note"}:
+            raise Failure("invalid_seed_artist", item=n)
+        artist = {"name": text(item.get("name"), "artist")}
+        if not blank(item.get("note")):
+            artist["note"] = text(item["note"], "note")
+        out["artists"].append(artist)
+    for n, item in enumerate(data.get("songs", []), 1):
+        if not isinstance(item, dict) or set(item) - {"artist", "title"}:
+            raise Failure("invalid_seed_song", item=n)
+        out["songs"].append({"artist": text(item.get("artist"), "artist"), "title": text(item.get("title"), "title")})
+    for key in ("block_artists", "remove_artists"):
+        if not isinstance(data.get(key, []), list):
+            raise Failure("invalid_" + key)
+        out[key] = [text(v, "artist") for v in data.get(key, [])]
+    if not blank(data.get("notes")):
+        out["notes"] = text(data["notes"], "notes", 2000)
+    if data.get("clear_notes") not in (None, False, True):
+        raise Failure("invalid_clear_notes")
+    out["clear_notes"] = data.get("clear_notes") is True
+    if sum(len(out[k]) for k in ("artists", "songs", "block_artists", "remove_artists")) > 200:
+        raise Failure("too_many_seeds")
+    return out
+
+
+def merge_seeds(change):
+    root = library_root()
+    with library_lock(root):
+        seeds = read_state(root, "seeds.json", {})
+        artists = {norm(a["name"]): a for a in seeds.get("artists", []) if isinstance(a, dict) and a.get("name")}
+        songs = {song_key(s["artist"], s["title"]): s for s in seeds.get("songs", [])
+                 if isinstance(s, dict) and s.get("artist") and s.get("title")}
+        block = {norm(a): a for a in seeds.get("block_artists", []) if isinstance(a, str)}
+        for artist in change["artists"]:
+            old = artists.get(norm(artist["name"]), {})
+            artists[norm(artist["name"])] = {**old, **artist}
+            block.pop(norm(artist["name"]), None)
+        for song in change["songs"]:
+            songs.setdefault(song_key(song["artist"], song["title"]), song)
+        for name in change["block_artists"]:
+            block[norm(name)] = name
+        for name in change["remove_artists"] + change["block_artists"]:
+            artists.pop(norm(name), None)
+            songs = {k: s for k, s in songs.items() if norm(main_artist(s["artist"])) != norm(main_artist(name))}
+        seeds.update(artists=list(artists.values()), songs=list(songs.values()), block_artists=list(block.values()))
+        # Notes grow line by line: a model never has to repeat the old ones to keep them.
+        lines = [] if change["clear_notes"] else [n for n in str(seeds.get("notes") or "").splitlines() if n.strip()]
+        if "notes" in change and norm(change["notes"]) not in map(norm, lines):
+            lines.append(change["notes"])
+        seeds["notes"] = "\n".join(lines)[-4000:]
+        write_json(discovery_path(root, "seeds.json"), seeds)
+    emit("seeds", **{k: seeds.get(k) for k in ("notes", "artists", "songs", "block_artists")})
+    return 0
+
+
+def column(header, *names):
+    for name in names:
+        if name in header:
+            return header[name]
+    return None
+
+
+def parse_playlist(raw):
+    """Exportify (Spotify) CSV, or any CSV with track and artist columns -> queue entries."""
+    import csv
+    try:
+        rows = list(csv.reader(raw.decode("utf-8-sig").splitlines()))
+    except csv.Error as exc:
+        raise Failure("invalid_playlist_csv") from exc
+    if len(rows) < 2:
+        raise Failure("empty_playlist")
+    header = {h.strip().casefold(): i for i, h in enumerate(rows[0])}
+    title_col = column(header, "track name", "track", "title", "song", "name")
+    artist_col = column(header, "artist name(s)", "artist name", "artists", "artist")
+    if title_col is None or artist_col is None:
+        raise Failure("playlist_needs_track_and_artist_columns")
+    album_col = column(header, "album name", "album")
+    date_col = column(header, "release date", "album release date", "year")
+    ms_col = column(header, "duration (ms)", "duration_ms", "track duration (ms)")
+    out = []
+    for row in rows[1:MAX_QUEUE + 1]:
+        def cell(i):
+            return clip(row[i]) if i is not None and i < len(row) else None
+        title, credit = cell(title_col), cell(artist_col)
+        if not title or not credit:
+            continue
+        artists = [a for a in (clip(a) for a in re.split(r"\s*;\s*" if ";" in credit else r",\s+", credit)) if a][:20]
+        entry = {"artist": artists[0], "title": title, "search": clip(artists[0] + " " + base_title(title))}
+        if len(artists) > 1:
+            entry["artists"] = artists
+        if cell(album_col):
+            entry["album"] = cell(album_col)
+        year = re.match(r"\d{4}", cell(date_col) or "")
+        if year and 1000 <= int(year.group()) <= 2100:
+            entry["year"] = int(year.group())
+        ms = cell(ms_col)
+        if ms and ms.isdigit() and 1000 <= int(ms) <= 3600000:
+            entry["duration"] = round(int(ms) / 1000)
+        out.append(entry)
+    return out
+
+
+def queue_playlist(raw):
+    entries = parse_playlist(raw)
+    root = library_root()
+    with library_lock(root):
+        idx = library_index(read_library())
+        gone, _ = blocked(read_state(root, "history.json", {}))
+        queue = [q for q in read_state(root, "queue.json", []) if isinstance(q, dict) and q.get("title")]
+        queued = {song_key(q["artist"], q["title"]) for q in queue}
+        counts = {"queued": 0, "in_library": 0, "duplicate": 0, "removed_before": 0}
+        new = []
+        for entry in entries:
+            key = song_key(entry["artist"], entry["title"])
+            reason = ("in_library" if key in idx["keys"] else "duplicate" if key in queued
+                      else "removed_before" if key in gone else "queued")
+            counts[reason] += 1
+            if reason == "queued" and len(queue) + len(new) < MAX_QUEUE:
+                new.append({**entry, "queued": now().isoformat(), "offered": 0})
+                queued.add(key)
+        queue = interleave(queue, new)
+        write_json(discovery_path(root, "queue.json"), queue)
+    emit("queued", **counts, queue=len(queue))
+    return 0
+
+
+def interleave(old, new):
+    """Spread a new playlist evenly through the queue, so every import day mixes
+    all playlists instead of working through them one after another."""
+    spread = [((i + 0.5) / len(old), 0, q) for i, q in enumerate(old)]
+    spread += [((j + 0.5) / len(new), 1, q) for j, q in enumerate(new)]
+    return [q for _, _, q in sorted(spread, key=lambda item: item[:2])]
+
+
+def track_stats(releases, songs):
+    """Navidrome songs (fake paths) -> {(release id, track n): {"plays", "starred"}}, matched
+    on album + title and the nearest duration."""
+    index = {}
+    for rel in releases:
+        for t in rel["tracks"]:
+            if t.get("title"):
+                index.setdefault((norm(rel["album"]), norm(t["title"])), []).append((rel["id"], t["n"], t.get("duration") or 0))
+    stats = {}
+    for song in songs:
+        found = index.get((norm(song.get("album")), norm(song.get("title"))))
+        if not found:
+            continue
+        duration = song.get("duration") if isinstance(song.get("duration"), (int, float)) else 0
+        rid, n, _ = min(found, key=lambda f: abs(f[2] - duration))
+        plays = song.get("playCount") if isinstance(song.get("playCount"), int) else 0
+        rating = song.get("userRating") if isinstance(song.get("userRating"), int) else 0
+        entry = stats.setdefault((rid, n), {"plays": 0, "starred": False})
+        entry["plays"] += plays
+        entry["starred"] = entry["starred"] or bool(song.get("starred")) or rating >= 4
+    return stats
+
+
+def listening(releases):
+    """Play counts and stars from Navidrome, or None when it cannot be asked."""
+    songs, offset = [], 0
+    try:
+        while offset < 50000:
+            response = subsonic("search3", {"query": "", "songCount": 500, "songOffset": offset,
+                                            "artistCount": 0, "albumCount": 0}, limit=16 * MAX_RESPONSE)
+            if response is None:
+                return None
+            page = (response.get("searchResult3") or {}).get("song") or []
+            songs += [s for s in page if isinstance(s, dict)]
+            if len(page) < 500:
+                break
+            offset += 500
+    except (OSError, ValueError, AttributeError, Failure, urllib.error.URLError) as exc:
+        if isinstance(exc, Failure) and exc.code in (130, 143):
+            raise
+        return None
+    return track_stats(releases, songs)
+
+
+def library_seeds(releases, stats):
+    """Radio seeds from the library: starred 3, played twice 2, asked-for or playlist songs 1.
+    Discovered songs count only once they have been played."""
+    seeds = []
+    for rel in releases:
+        for t in rel["tracks"]:
+            vid = video_id(t.get("url"))
+            if not vid or not t.get("title"):
+                continue
+            s = stats.get((rel["id"], t["n"]), {"plays": 0, "starred": False})
+            weight = (3 if s["starred"] else 2 if s["plays"] >= 2 else
+                      1 if s["plays"] or rel.get("origin", "request") != "discovery" else 0)
+            if weight:
+                seeds.append({"name": f"{rel['artist']} - {base_title(t['title'])}", "video": vid, "weight": weight})
+    return seeds
+
+
+def pick_seeds(own, users, rng):
+    """While few songs are starred or played, the user's seeds steer; then listening does."""
+    strong = [s for s in own if s["weight"] >= 2]
+    pool = strong + (users if len(strong) < MAX_RADIO_SEEDS else [])
+    rest = [s for s in own if s["weight"] < 2] + (users if len(strong) >= MAX_RADIO_SEEDS else [])
+    rng.shuffle(pool)
+    pool.sort(key=lambda s: -s["weight"])
+    chosen = pool[:TOP_SEEDS]
+    others = pool[TOP_SEEDS:] + rest
+    rng.shuffle(others)
+    return chosen + others[:MAX_RADIO_SEEDS - len(chosen)]
+
+
+def clean_channel(channel):
+    channel = re.sub(r"\s+and \d+ more$|\s*-\s*Topic$|VEVO$|\s+Official$", "", channel or "", flags=re.I)
+    return channel.strip() or None
+
+
+def radio_candidate(entry):
+    """One radio item -> {"artist", "title", "url", "duration", "names"}, or None for noise."""
+    s = video_summary(entry)
+    if not s or not s.get("title") or NOISE.search(s["title"]) or NOISE.search(s.get("channel") or ""):
+        return None
+    if s["duration"] is not None and not MIN_SONG <= s["duration"] <= MAX_SONG:
+        return None
+    channel = s.get("channel") or ""
+    if channel.endswith(" - Topic"):
+        artist, title, names = channel[:-len(" - Topic")], s["title"], "release"
+    else:
+        song = s.get("song") or {}
+        artist, title, names = song.get("artist") or clean_channel(channel), song.get("title") or s["title"], "guessed"
+    if not clip(artist) or not clip(title):
+        return None
+    return {"artist": clip(artist), "title": clip(title), "url": s["url"], "duration": s["duration"], "names": names}
+
+
+def radio(video, cwd, env):
+    entries = capture([*ytdlp_base(), "--flat-playlist", "--dump-json", "--playlist-items", f"1:{RADIO_ITEMS}", "--",
+                       f"https://www.youtube.com/watch?v={video}&list=RDAMVM{video}"], cwd, env)
+    return [c for c in map(radio_candidate, entries) if c]
+
+
+def first_song(query, cwd, env):
+    """Video id of the top YouTube Music song for a search, or None."""
+    found = capture([*ytdlp_base(), "--flat-playlist", "--dump-json", "--playlist-items", "1", "--",
+                     "https://music.youtube.com/search?q=" + urllib.parse.quote(query) + "#songs"], cwd, env)
+    return next((video_id(s["url"]) for s in map(video_summary, found) if s), None)
+
+
+def near_known(c, titles):
+    """Same title as a library song by a similar artist name ("HUNTRIX" / "HUNTR/X")."""
+    artist = norm(main_artist(c["artist"]))
+    return any(difflib.SequenceMatcher(None, artist, known).ratio() >= 0.8
+               for known in titles.get(norm(base_title(c["title"])), ()))
+
+
+def score(radios, skip_keys, skip_videos, skip_artists, titles=None):
+    """radios: [(seed, [candidate, ...])] -> candidates ranked by how many (and how loved)
+    seeds' radios hold them, higher in the radio counting more."""
+    found = {}
+    for seed, items in radios:
+        for pos, c in enumerate(items):
+            key = song_key(c["artist"], c["title"])
+            if (key in skip_keys or video_id(c["url"]) in skip_videos
+                    or norm(main_artist(c["artist"])) in skip_artists or near_known(c, titles or {})):
+                continue
+            entry = found.setdefault(key, {**c, "score": 0.0, "because": [], "key": key})
+            if c["names"] == "release" and entry["names"] != "release":
+                entry.update(c)  # a Topic upload's names beat names guessed from a video title
+            entry["score"] += seed["weight"] * (1 - pos / (2 * RADIO_ITEMS))
+            if seed["name"] not in entry["because"]:
+                entry["because"].append(seed["name"])
+    ranked, per_artist = [], {}
+    for c in sorted(found.values(), key=lambda c: -c["score"]):
+        artist = norm(main_artist(c["artist"]))
+        if per_artist.get(artist, 0) >= PER_ARTIST:
+            continue
+        per_artist[artist] = per_artist.get(artist, 0) + 1
+        ranked.append({**c, "score": round(c["score"], 2), "because": c["because"][:3]})
+        if len(ranked) >= MAX_CANDIDATES:
+            break
+    return ranked
+
+
+def stale_releases(releases, stats, today):
+    """Discovered releases older than STALE_DAYS that were never played or starred."""
+    out = []
+    for rel in releases:
+        if rel.get("origin") != "discovery" or not rel.get("added"):
+            continue
+        try:
+            added = datetime.datetime.fromisoformat(rel["added"])
+        except ValueError:
+            continue
+        if (today - added).days < STALE_DAYS:
+            continue
+        if any(stats.get((rel["id"], t["n"]), {}).get("plays") or stats.get((rel["id"], t["n"]), {}).get("starred")
+               for t in rel["tracks"]):
+            continue
+        out.append({"id": rel["id"], "artist": rel["artist"], "titles": [t.get("title") for t in rel["tracks"]],
+                    "added": rel["added"][:10]})
+    return out
+
+
+def ensure_playlists(music):
+    for name, rules in PLAYLISTS.items():
+        path = music / name
+        if not path.exists() and not path.is_symlink():
+            with contextlib.suppress(OSError):
+                path.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+
+
+def discover():
+    """Everything the discovery agent chooses from. Downloads nothing; updates only the
+    discovery state (queue bookkeeping, offer counts, resolved seed ids)."""
+    root = library_root()
+    music = safe_dir(root / "music")
+    ensure_playlists(music)
+    releases = read_library()
+    idx = library_index(releases)
+    stats = listening(releases)
+    seeds = read_state(root, "seeds.json", {})
+    history = read_state(root, "history.json", {})
+    skip_keys, skip_videos = blocked(history)
+    skip_keys |= idx["keys"]
+    skip_videos |= idx["videos"]
+    skip_artists = {norm(main_artist(a)) for a in seeds.get("block_artists", []) if isinstance(a, str)}
+    queue = [q for q in read_state(root, "queue.json", []) if isinstance(q, dict) and q.get("title")]
+    queue = [q for q in queue if song_key(q["artist"], q["title"]) not in idx["keys"]]
+    offer = queue[:MAX_QUEUE_OUT]
+    skip_keys |= {song_key(q["artist"], q["title"]) for q in queue}
+
+    users = [{"name": f"{s['artist']} - {s['title']}", "query": f"{s['artist']} {s['title']}", "seed": s, "weight": 2}
+             for s in seeds.get("songs", []) if isinstance(s, dict) and s.get("artist") and s.get("title")]
+    users += [{"name": a["name"], "query": a["name"], "seed": a, "weight": 2}
+              for a in seeds.get("artists", []) if isinstance(a, dict) and a.get("name")]
+    for u in users:
+        u["video"] = u["seed"].get("video") if YOUTUBE_ID.match(str(u["seed"].get("video", ""))) else None
+    chosen = pick_seeds(library_seeds(releases, stats or {}), users, random.Random())
+    radios, errors = [], []
+    with tempfile.TemporaryDirectory(prefix="discover-") as tmp:
+        env = {"PATH": os.environ["PATH"], "HOME": tmp, "XDG_CONFIG_HOME": tmp,
+               "XDG_CACHE_HOME": tmp, "TMPDIR": tmp, "LANG": "C.UTF-8"}
+        for seed in chosen:
+            try:
+                if not seed.get("video"):
+                    seed["video"] = first_song(seed["query"], tmp, env)
+                if seed["video"]:
+                    radios.append((seed, radio(seed["video"], tmp, env)))
+            except (Failure, OSError, ValueError) as exc:
+                if isinstance(exc, Failure) and exc.code in (130, 143):
+                    raise
+                errors.append({"seed": seed["name"], "reason": "radio_failed"})
+    candidates = score(radios, skip_keys, skip_videos, skip_artists, idx["titles"])
+    known = {norm(main_artist(a)) for a in idx["artists"].values()}
+    for c in candidates:
+        c["new_artist"] = norm(main_artist(c["artist"])) not in known
+    resolved = {u["name"]: u["video"] for u in users if u.get("video") and not u["seed"].get("video")}
+
+    with library_lock(root):
+        # Re-read under the lock: an import, removal or seeds change may have run meanwhile.
+        history = read_state(root, "history.json", {})
+        stamp = now().isoformat()
+        kept = []
+        for n, q in enumerate(queue):
+            if n < len(offer):
+                q["offered"] = q.get("offered", 0) + 1
+            if q.get("offered", 0) > PASS_AFTER:
+                history[song_key(q["artist"], q["title"])] = {"artist": q["artist"], "title": q["title"],
+                                                              "status": "not_found", "at": stamp}
+            else:
+                kept.append(q)
+        # Radio candidates only count as passed over once the queue is empty.
+        if not offer:
+            for c in candidates:
+                rec = history.setdefault(c["key"], {"artist": c["artist"], "title": c["title"], "status": "offered"})
+                rec.update(offered=rec.get("offered", 0) + 1, video=video_id(c["url"]), at=stamp)
+        write_json(discovery_path(root, "queue.json"), kept)
+        write_json(discovery_path(root, "history.json"), history)
+        if resolved:  # remember each seed's song, so its radio needs no search next time
+            fresh = read_state(root, "seeds.json", {})
+            for s in [s for s in fresh.get("songs", []) + fresh.get("artists", []) if isinstance(s, dict)]:
+                name = f"{s.get('artist')} - {s.get('title')}" if "title" in s else s.get("name")
+                if name in resolved:
+                    s["video"] = resolved[name]
+            write_json(discovery_path(root, "seeds.json"), fresh)
+    for c in candidates:
+        del c["key"]
+    emit("discover", library_songs=sum(len(r["tracks"]) for r in releases),
+         listening="ok" if stats is not None else "unavailable",
+         taste={"notes": seeds.get("notes", ""), "artists": [{k: a[k] for k in ("name", "note") if k in a}
+                                                              for a in seeds.get("artists", []) if isinstance(a, dict)],
+                "blocked_artists": seeds.get("block_artists", [])},
+         queue=[{k: q[k] for k in ("artist", "title", "album", "year", "duration", "search") if k in q} for q in offer],
+         queue_total=len(kept), radio_seeds=[s["name"] for s, _ in radios], candidates=candidates,
+         stale=stale_releases(releases, stats, now()) if stats is not None else [], errors=errors)
+    return 0
+
+
 def interrupted(signum, frame):
     raise Failure("interrupted", 128 + signum)
 
 
-def import_all(releases):
+def import_all(releases, skipped=()):
     """Import releases one by one and end with ONE `summary` line an agent can report from.
 
     Exit 0 only if every release was added. Invalid/unavailable sources (65/69) skip
@@ -1170,7 +1727,7 @@ def import_all(releases):
             not_attempted = [describe(r) for r in releases[i + 1:]]
             break
     emit("summary", ok=not failed and not not_attempted and not first_code,
-         added=added, failed=failed, not_attempted=not_attempted)
+         added=added, failed=failed, not_attempted=not_attempted, **({"skipped": list(skipped)} if skipped else {}))
     return first_code
 
 
@@ -1189,6 +1746,10 @@ def main():
                       help='Fix tags/covers from {"changes": [...]}; audio is not re-downloaded')
     mode.add_argument("--remove", action="store_true",
                       help='Move {"releases": [...]} to the library trash; nothing is deleted')
+    mode.add_argument("--discover", action="store_true",
+                      help="List songs to add: playlist queue, radio candidates, stale discoveries; reads no stdin")
+    mode.add_argument("--seeds", action="store_true", help='Merge taste seeds {"artists": [...], "songs": [...], "notes": ...}')
+    mode.add_argument("--queue", action="store_true", help="Queue the songs of a playlist CSV (Exportify) for import")
     args = parser.parse_args()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, interrupted)
@@ -1196,9 +1757,16 @@ def main():
         if args.library:
             emit("library", releases=read_library())
             return 0
-        raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
-        if len(raw) > MAX_REQUEST:
+        if args.discover:
+            return discover()
+        limit = MAX_PLAYLIST if args.queue else MAX_REQUEST
+        raw = sys.stdin.buffer.read(limit + 1)
+        if len(raw) > limit:
             raise Failure("request_too_large")
+        if args.queue:
+            return queue_playlist(raw)
+        if args.seeds:
+            return merge_seeds(validate_seeds(json.loads(raw)))
         if args.lookup:
             lookup(validate_lookup(json.loads(raw), resolve=True))
             return 0
@@ -1207,12 +1775,12 @@ def main():
         if args.remove:
             return remove(validate_removal(json.loads(raw)))
         releases = parse(json.loads(raw), resolve=not args.validate)
-        check_library(releases)
+        skipped = check_library(releases)
         if args.validate:
             emit("valid", releases=[describe(r) for r in releases],
-                 tracks=sum(len(r["tracks"]) for r in releases))
+                 tracks=sum(len(r["tracks"]) for r in releases), **({"skipped": skipped} if skipped else {}))
             return 0
-        return import_all(releases)
+        return import_all(releases, skipped)
     except Failure as exc:
         emit("error", code=exc.code, reason=str(exc), **({"song": exc.item} if exc.item else {}))
         return exc.code

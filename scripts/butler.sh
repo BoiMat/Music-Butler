@@ -19,6 +19,10 @@ Usage: scripts/butler.sh <command>
   library          every release with its id, tags, cover/lyrics status (JSON)
   retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
   remove <id>      move releases in requests/remove-<id>.json to the library trash
+  discover         songs to add next: playlist queue, radio candidates, stale
+                   discoveries (JSON; downloads nothing)
+  seeds <id>       merge taste seeds from requests/seeds-<id>.json
+  queue <id>       queue the songs of requests/spotify-<id>.csv (an Exportify export)
   drives           list mounted external drives (macOS /Volumes, Linux /media)
   backup [drive]   encrypted backup to <drive mount>/music-butler-restic,
                    or to BACKUP_REPOSITORY from .env when no drive is given
@@ -27,16 +31,17 @@ EOF
     exit 64
 }
 
-# request_file <kind> <id>: requests/<kind>-<id>.json, kind is approved, lookup, retag or remove.
+# request_file <kind> <id> [ext]: requests/<kind>-<id>.<ext> (default json), kind is
+# approved, lookup, retag, remove, seeds or spotify.
 request_file() {
-    local id="${2:-}"
+    local id="${2:-}" ext="${3:-json}"
     # Small models often pass the file name: requests/lookup-songs.json means id "songs".
     id="${id#requests/}"
     id="${id#"$1"-}"
-    id="${id%.json}"
+    id="${id%."$ext"}"
     # No dots or slashes, so an id can never leave requests/.
     [[ "$id" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'invalid request id: use lowercase letters, digits, dashes' >&2; exit 64; }
-    local file="requests/$1-$id.json"
+    local file="requests/$1-$id.$ext"
     [[ -f "$file" && ! -L "$file" ]] || { echo "missing $file" >&2; exit 66; }
     printf '%s' "$file"
 }
@@ -106,6 +111,17 @@ case "${1:-}" in
     remove)
         file="$(request_file remove "${2:-}")"
         "${compose[@]}" run --rm -T downloader --remove < "$file"
+        ;;
+    discover)
+        "${compose[@]}" run --rm -T downloader --discover < /dev/null
+        ;;
+    seeds)
+        file="$(request_file seeds "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --seeds < "$file"
+        ;;
+    queue)
+        file="$(request_file spotify "${2:-}" csv)"
+        "${compose[@]}" run --rm -T downloader --queue < "$file"
         ;;
     status)
         "${compose[@]}" ps navidrome

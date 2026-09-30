@@ -215,6 +215,26 @@ in the test harness.
 Not run: lookup inside the container, and a real small model choosing results
 and cleaning titles.
 
+## Taste bootstrap and weekly discovery (2026-09-30) — executed
+
+- 58 tests pass in `music-butler-tools:local` (`--init`; 1 POSIX skip): the 46
+  earlier ones plus radio parsing and noise filter, scoring/caps/near-duplicates,
+  seed selection, Exportify CSV parsing, seeds validation, Navidrome play-count
+  matching and stale selection, origin tags, bulk-add skip, and a full
+  seeds -> queue -> discover -> remove -> discover cycle with mocked yt-dlp/Navidrome.
+- Live `butler.sh discover` on the 5-song library: Navidrome listening read
+  (`search3` reports fake paths, so songs are matched on album + title +
+  duration), 5 YouTube Music radios (`RDAMVM<id>`), 40 ranked candidates in ~8 s.
+- Navidrome 0.64.1 imported both `.nsp` smart playlists from the music folder
+  with the default settings. After an import they listed exactly the songs
+  tagged `music-butler:discovery`.
+- One live `music-discover` run on gpt-6-luna (3-song test): it read discover,
+  looked the songs up, wrote one approved request with `"origin": "discovery"`,
+  added Zara Larsson, Hozier and Taylor Swift songs (synced lyrics), and wrote
+  the report.
+- Not yet seen: a Spotify CSV import live, a scheduled bootstrap/weekly cron
+  run, and pruning of a real stale discovery (needs 4 weeks).
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):

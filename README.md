@@ -111,6 +111,52 @@ what is certain and report the rest.
 **Artist pictures** come from Navidrome's Deezer agent, by artist name (Navidrome
 sends artist names to Deezer). Set `DEEZER_ENABLED=false` in `.env` to turn it off.
 
+## Taste bootstrap and weekly discovery
+
+The library can grow without you naming every song. You give a direction once;
+an agent then adds songs from your playlists and songs you have not heard yet.
+
+```sh
+./scripts/butler.sh seeds <id>       # requests/seeds-<id>.json: {"artists": ["Name" | {"name", "note"}],
+                                     #   "songs": [{"artist", "title"}], "notes": "..." (added to
+                                     #   earlier notes; "clear_notes": true resets them),
+                                     #   "block_artists": [...], "remove_artists": [...]}
+./scripts/butler.sh queue <id>       # requests/spotify-<id>.csv (an https://exportify.app export)
+./scripts/butler.sh discover         # what to add next (JSON); downloads nothing
+```
+
+- **Playlists**: `queue` reads a Spotify playlist exported as CSV with Exportify
+  (any CSV with track and artist columns works) and queues the songs that are not
+  in the library yet.
+- **Discovery**: `discover` reads the YouTube Music radio of songs you love and
+  ranks the songs found there by how many (and how loved) seeds lead to them. At
+  most 2 songs per artist; songs already in the library, removed before or
+  offered 4 times without being picked are skipped. Seeds are songs you starred
+  or rated 4+ (weight 3) or played twice (2) in Navidrome, plus the songs you
+  asked for or imported from playlists (1). Your `seeds` artists and songs steer
+  only while fewer than 12 songs are starred or played. After that, your
+  listening steers.
+- **Pruning**: `discover` lists as `stale` the discovered songs older than 4
+  weeks that were never played or starred. `remove` moves them to the trash and
+  records them, so they are never suggested again.
+- Imports carry an `origin` (`request`, `playlist`, `seed`, `discovery`). It is
+  kept in `provenance.json`, shown by `library` and written as the comment tag
+  `music-butler:<origin>`. Bulk origins skip songs already in the library
+  instead of failing the request.
+- `discover` also writes two Navidrome smart playlists into the music folder:
+  *Discover Weekly* (discoveries of the last 7 days) and *Discoveries to rate*.
+- State lives in `<library>/discovery/` (`seeds.json`, `queue.json`,
+  `history.json`) and is backed up with the library.
+
+[`skills/music-discover/SKILL.md`](skills/music-discover/SKILL.md) is the agent
+side: it runs `discover`, removes stale songs, chooses the songs (playlist queue,
+then well-known songs of seed artists, then candidates fitting your notes), looks
+them up and adds them with their origin. With Hermes, run it like the audit, from
+no-agent cron scripts (`-s music-discover`): a daily bootstrap job (25 songs a
+day, playlist queue first, silent once the library holds 150 songs and the
+queue is empty) and a weekly
+job (15 songs, at least 5 by new artists).
+
 ## Local Ollama agent
 
 [`scripts/agent.py`](scripts/agent.py) is a small, standard-library-only chat
@@ -166,7 +212,7 @@ checkout and `terminal.timeout: 1800`, and add `TERMINAL_MAX_FOREGROUND_TIMEOUT=
 to its `.env` so long imports are not cut off. Limiting `platform_toolsets` to
 `file`, `skills` and `terminal` keeps the prompt small. Tell the profile's
 `SOUL.md` to call `skill_view` for `music-butler` first: gateways do not preload skills.
-The installer also installs `music-audit`. For a weekly audit on a stronger
+The installer also installs `music-audit` and `music-discover`. For a weekly audit on a stronger
 model while chat stays local, run it from a no-agent cron script that calls
 `hermes -p <profile> chat -Q --provider <provider> -m <model> -t terminal,file,skills -s music-audit -q '...'`
 and set `cron.script_timeout_seconds` high enough (an LLM cron job in a profile
@@ -179,7 +225,8 @@ and use `provider: custom`, `base_url: http://localhost:11434/v1`.
 - Agents run only [`scripts/butler.sh`](scripts/butler.sh), which accepts a request
   id or a drive name, never free text. Request data is a JSON file.
 - Configure your agent's command approval so it may write
-  `requests/approved-*.json` and `requests/lookup-*.json` and run
+  `requests/approved-*.json`, `requests/lookup-*.json` (and, for the audit and
+  discovery skills, `retag-`, `remove-` and `seeds-*.json`) and run
   `scripts/butler.sh` and nothing broader. The skill works without the agent's
   own web search: `butler.sh lookup` searches YouTube through yt-dlp in the
   downloader container. The
@@ -205,6 +252,7 @@ and use `provider: custom`, `base_url: http://localhost:11434/v1`.
 │   └── request.example.json
 ├── skills/music-butler/SKILL.md     # agent skill (any SKILL.md-aware agent)
 ├── skills/music-audit/SKILL.md      # periodic library clean-up skill
+├── skills/music-discover/SKILL.md   # playlist bootstrap + weekly discovery skill
 ├── docker/Dockerfile
 ├── scripts/
 │   ├── butler.sh                    # fixed agent entry point
