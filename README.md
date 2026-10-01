@@ -131,20 +131,26 @@ an agent then adds songs from your playlists and songs you have not heard yet.
 - **Discovery**: `discover` reads the YouTube Music radio of songs you love and
   ranks the songs found there by how many (and how loved) seeds lead to them. At
   most 2 songs per artist; songs already in the library, removed before or
-  offered 4 times without being picked are skipped. Seeds are songs you starred
-  or rated 4+ (weight 3) or played twice (2) in Navidrome, plus the songs you
-  asked for or imported from playlists (1). Your `seeds` artists and songs steer
-  only while fewer than 12 songs are starred or played. After that, your
-  listening steers.
-- **Pruning**: `discover` lists as `stale` the discovered songs older than 4
-  weeks that were never played or starred. `remove` moves them to the trash and
+  offered 4 times without being picked are skipped. Seeds are your songs in
+  Navidrome: 5 stars (weight 4), 4 stars or starred (3), played twice (2),
+  3 stars, played once, asked for or imported from playlists (1); 1-2 stars is
+  never a seed. Your `seeds` artists and songs steer only while fewer than 12
+  songs are rated 4+, starred or played twice. After that, your listening steers.
+  Ratings and plays are per Navidrome user: set `NAVIDROME_LISTENER_USER` to the
+  account you play with (e.g. Tempo's) and put its password in
+  `secrets/navidrome_listener_password` (mode 600).
+- **Pruning**: `discover` lists as `stale` the discovered songs you rated 1-2
+  stars, and those older than 4 weeks that were never played, starred or rated. `remove` moves them to the trash and
   records them, so they are never suggested again.
 - Imports carry an `origin` (`request`, `playlist`, `seed`, `discovery`). It is
   kept in `provenance.json`, shown by `library` and written as the comment tag
   `music-butler:<origin>`. Bulk origins skip songs already in the library
   instead of failing the request.
 - `discover` also writes two Navidrome smart playlists into the music folder:
-  *Discover Weekly* (discoveries of the last 7 days) and *Discoveries to rate*.
+  *Discover Weekly* (discoveries of the last 7 days) and *Discoveries to rate*
+  (the last 4 weeks). Navidrome evaluates smart-playlist play counts and ratings
+  for the playlist's owner (the admin), so these rules use only dates;
+  `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes them visible to the Tempo account.
 - State lives in `<library>/discovery/` (`seeds.json`, `queue.json`,
   `history.json`) and is backed up with the library.
 

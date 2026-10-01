@@ -732,12 +732,13 @@ class Lyrics:
         return None
 
 
-def subsonic(endpoint, params=None, limit=MAX_RESPONSE):
+def subsonic(endpoint, params=None, limit=MAX_RESPONSE, account="NAVIDROME"):
     """One authenticated Subsonic API call to Navidrome: the "subsonic-response" dict,
-    or None when no Navidrome user is configured."""
+    or None when that account is not configured. account "NAVIDROME" is the admin
+    (scans); "NAVIDROME_LISTENER" is the account the user plays and rates with."""
     base = os.environ.get("NAVIDROME_URL", "").rstrip("/")
-    user = os.environ.get("NAVIDROME_USER", "")
-    password_file = os.environ.get("NAVIDROME_PASSWORD_FILE", "")
+    user = os.environ.get(account + "_USER", "")
+    password_file = os.environ.get(account + "_PASSWORD_FILE", "")
     if not base or not user or not password_file:
         return None
     p = urllib.parse.urlsplit(base)
@@ -1219,10 +1220,13 @@ PLAYLISTS = {  # Navidrome smart playlists, kept in the library's music folder
         "name": "Discover Weekly", "comment": "Songs Music Butler discovered in the last week",
         "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": 7}}],
         "sort": "dateadded", "order": "desc", "limit": 100},
+    # Play counts and ratings in smart playlists are the playlist owner's (the admin), not
+    # the listener's, so this one only uses the date: rate these before they are pruned.
     "Discoveries to rate.nsp": {
         "name": "Discoveries to rate",
-        "comment": "Discovered songs you have not played or starred yet. Unplayed, unstarred ones leave after 4 weeks",
-        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"is": {"playcount": 0}}, {"is": {"loved": False}}],
+        "comment": "Discoveries of the last 4 weeks. Rate them: 1-2 stars removes a song, "
+                   "4-5 stars brings more like it; unplayed, unrated ones leave after 4 weeks",
+        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": STALE_DAYS}}],
         "sort": "dateadded", "order": "desc", "limit": 200},
 }
 
@@ -1448,19 +1452,23 @@ def track_stats(releases, songs):
         rid, n, _ = min(found, key=lambda f: abs(f[2] - duration))
         plays = song.get("playCount") if isinstance(song.get("playCount"), int) else 0
         rating = song.get("userRating") if isinstance(song.get("userRating"), int) else 0
-        entry = stats.setdefault((rid, n), {"plays": 0, "starred": False})
+        entry = stats.setdefault((rid, n), {"plays": 0, "starred": False, "rating": 0})
         entry["plays"] += plays
-        entry["starred"] = entry["starred"] or bool(song.get("starred")) or rating >= 4
+        entry["starred"] = entry["starred"] or bool(song.get("starred"))
+        entry["rating"] = max(entry["rating"], rating)
     return stats
 
 
 def listening(releases):
-    """Play counts and stars from Navidrome, or None when it cannot be asked."""
+    """Play counts, stars and ratings of the listening account (e.g. the one Tempo uses;
+    the admin account if none is configured), or None when Navidrome cannot be asked."""
+    account = "NAVIDROME_LISTENER" if os.environ.get("NAVIDROME_LISTENER_USER") else "NAVIDROME"
     songs, offset = [], 0
     try:
         while offset < 50000:
             response = subsonic("search3", {"query": "", "songCount": 500, "songOffset": offset,
-                                            "artistCount": 0, "albumCount": 0}, limit=16 * MAX_RESPONSE)
+                                            "artistCount": 0, "albumCount": 0},
+                                limit=16 * MAX_RESPONSE, account=account)
             if response is None:
                 return None
             page = (response.get("searchResult3") or {}).get("song") or []
@@ -1475,18 +1483,34 @@ def listening(releases):
     return track_stats(releases, songs)
 
 
+def disliked(s):
+    return 1 <= s.get("rating", 0) <= 2
+
+
+def seed_weight(s, origin):
+    """5 stars 4; 4 stars or starred 3; played twice 2; 3 stars, played, asked for or from a
+    playlist 1. Rated 1-2 stars, or discovered and not yet heard: not a seed."""
+    rating = s.get("rating", 0)
+    if disliked(s):
+        return 0
+    if rating == 5:
+        return 4
+    if rating == 4 or s.get("starred"):
+        return 3
+    if s.get("plays", 0) >= 2:
+        return 2
+    return 1 if rating or s.get("plays") or origin != "discovery" else 0
+
+
 def library_seeds(releases, stats):
-    """Radio seeds from the library: starred 3, played twice 2, asked-for or playlist songs 1.
-    Discovered songs count only once they have been played."""
+    """Radio seeds from the library, weighted by seed_weight."""
     seeds = []
     for rel in releases:
         for t in rel["tracks"]:
             vid = video_id(t.get("url"))
             if not vid or not t.get("title"):
                 continue
-            s = stats.get((rel["id"], t["n"]), {"plays": 0, "starred": False})
-            weight = (3 if s["starred"] else 2 if s["plays"] >= 2 else
-                      1 if s["plays"] or rel.get("origin", "request") != "discovery" else 0)
+            weight = seed_weight(stats.get((rel["id"], t["n"]), {}), rel.get("origin", "request"))
             if weight:
                 seeds.append({"name": f"{rel['artist']} - {base_title(t['title'])}", "video": vid, "weight": weight})
     return seeds
@@ -1577,7 +1601,8 @@ def score(radios, skip_keys, skip_videos, skip_artists, titles=None):
 
 
 def stale_releases(releases, stats, today):
-    """Discovered releases older than STALE_DAYS that were never played or starred."""
+    """Discovered releases rated 1-2 stars, or older than STALE_DAYS and never played,
+    starred or rated."""
     out = []
     for rel in releases:
         if rel.get("origin") != "discovery" or not rel.get("added"):
@@ -1586,22 +1611,25 @@ def stale_releases(releases, stats, today):
             added = datetime.datetime.fromisoformat(rel["added"])
         except ValueError:
             continue
-        if (today - added).days < STALE_DAYS:
-            continue
-        if any(stats.get((rel["id"], t["n"]), {}).get("plays") or stats.get((rel["id"], t["n"]), {}).get("starred")
-               for t in rel["tracks"]):
-            continue
+        heard = [stats.get((rel["id"], t["n"]), {}) for t in rel["tracks"]]
+        if not all(disliked(s) for s in heard):
+            if (today - added).days < STALE_DAYS:
+                continue
+            if any(s.get("plays") or s.get("starred") or s.get("rating") for s in heard):
+                continue
         out.append({"id": rel["id"], "artist": rel["artist"], "titles": [t.get("title") for t in rel["tracks"]],
                     "added": rel["added"][:10]})
     return out
 
 
 def ensure_playlists(music):
+    """Write Music Butler's smart playlists; Navidrome re-reads a changed file."""
     for name, rules in PLAYLISTS.items():
-        path = music / name
-        if not path.exists() and not path.is_symlink():
-            with contextlib.suppress(OSError):
-                path.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+        path, content = music / name, json.dumps(rules, indent=2)
+        with contextlib.suppress(OSError):
+            if path.is_symlink() or (path.exists() and path.read_text(encoding="utf-8") == content):
+                continue
+            path.write_text(content, encoding="utf-8")
 
 
 def discover():

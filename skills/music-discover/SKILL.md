@@ -31,8 +31,9 @@ It downloads nothing. The last line is `{"event": "discover", ...}`:
   songs that led here) and `new_artist` (`true` = no song by this artist in the
   library yet). The names can be guessed from a video title and can be wrong
   or swapped (`"I Follow Rivers - Lykke Li"`). Step 3 finds the real names.
-- `stale`: discovered releases older than 4 weeks that the user never played
-  or starred. Each has `id`, `artist`, `titles`.
+- `stale`: discovered releases the user rated 1-2 stars, or that are older
+  than 4 weeks and were never played, starred or rated. Each has `id`,
+  `artist`, `titles`.
 - `listening`: `unavailable` means play counts could not be read (then `stale`
   is empty).
 
@@ -110,9 +111,9 @@ Keep it short. It is sent to the user's phone:
 - Removed: stale discoveries moved to the trash.
 - Failed songs in one line, with their `reason`.
 - Bootstrap: how many songs the library has now (`library_songs` + added).
-- Ending: "Star the songs you like in Tempo (they steer next week's picks);
-  unplayed discoveries leave after 4 weeks. New songs are in the
-  *Discover Weekly* playlist."
+- Ending: "Rate songs in Tempo: 4-5 stars brings more like them, 1-2 stars
+  removes a discovery. Unrated, unplayed discoveries leave after 4 weeks. New
+  songs are in the *Discover Weekly* playlist."
 
 If nothing could be added, say why in one line.
 

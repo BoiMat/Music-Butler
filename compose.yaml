@@ -44,6 +44,10 @@ x-tooling: &tooling
     NAVIDROME_URL: http://navidrome:4533
     NAVIDROME_USER: ${NAVIDROME_USER:-}
     NAVIDROME_PASSWORD_FILE: ${NAVIDROME_PASSWORD_FILE:-/run/music-secrets/navidrome_password}
+    # The account you play and rate with (e.g. Tempo's): discovery learns from its
+    # stars, ratings and plays. Blank = the admin account above.
+    NAVIDROME_LISTENER_USER: ${NAVIDROME_LISTENER_USER:-}
+    NAVIDROME_LISTENER_PASSWORD_FILE: ${NAVIDROME_LISTENER_PASSWORD_FILE:-/run/music-secrets/navidrome_listener_password}
 
 services:
   navidrome:
@@ -63,6 +67,9 @@ services:
       ND_SCANNER_SCHEDULE: ${SCAN_SCHEDULE:-@every 1m}
       ND_SCANNER_WATCHERWAIT: 5s
       ND_LYRICSPRIORITY: .lrc,embedded
+      # Smart playlists imported from the library (Discover Weekly...) are owned by
+      # the admin; public lets the Tempo account see them.
+      ND_DEFAULTPLAYLISTPUBLICVISIBILITY: "true"
       ND_ENABLESHARING: "false"
       ND_ENABLEINSIGHTSCOLLECTOR: "false"
       # Artist pictures by artist name (no API key). Sends artist names to Deezer;

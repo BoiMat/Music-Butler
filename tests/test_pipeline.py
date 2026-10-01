@@ -404,6 +404,26 @@ class NetworkMocks(unittest.TestCase):
         self.assertEqual(summary["added"][0]["warning"], "published_check_before_retry")
         self.assertEqual(summary["failed"], [])
 
+    def test_listener_account_and_playlist_updates(self):
+        for name, user in (("admin", "admin-user"), ("listener", "tempo-user")):
+            (self.root / name).write_text("pw-" + name)
+            (self.root / name).chmod(0o600)
+        env = {"NAVIDROME_URL": "http://navidrome:4533", "NAVIDROME_USER": "admin-user",
+               "NAVIDROME_PASSWORD_FILE": str(self.root / "admin"), "NAVIDROME_LISTENER_USER": "tempo-user",
+               "NAVIDROME_LISTENER_PASSWORD_FILE": str(self.root / "listener")}
+        with patch.dict(os.environ, env), patch.object(b, "fetch", return_value=b'{"subsonic-response":{"status":"ok"}}') as fetch:
+            b.subsonic("ping", account="NAVIDROME_LISTENER")
+            body = urllib.parse.parse_qs(fetch.call_args.kwargs["data"].decode())
+            self.assertEqual(body["u"], ["tempo-user"])
+            self.assertEqual(body["t"][0], hashlib.md5(("pw-listener" + body["s"][0]).encode()).hexdigest())
+        with patch.dict(os.environ, {"NAVIDROME_LISTENER_USER": ""}):
+            self.assertIsNone(b.subsonic("ping", account="NAVIDROME_LISTENER"))
+        old = self.root / "Discoveries to rate.nsp"
+        old.write_text('{"old": true}')
+        b.ensure_playlists(self.root)
+        self.assertEqual(json.loads(old.read_text())["all"][1], {"inTheLast": {"dateadded": b.STALE_DAYS}})
+        self.assertTrue((self.root / "Discover Weekly.nsp").is_file())
+
     def test_scan_post_token_and_errors(self):
         secret = self.root / "password"
         secret.write_text("test-only-password\n")
@@ -585,19 +605,28 @@ class Discovery(unittest.TestCase):
                  {"title": "Four", "album": "Four", "duration": 180, "userRating": 5},
                  {"title": "Unknown", "album": "X", "playCount": 9}]
         stats = b.track_stats(releases, songs)
-        self.assertEqual(stats[("b" * 32, 1)], {"plays": 3, "starred": False})
-        self.assertTrue(stats[("d" * 32, 1)]["starred"])
+        self.assertEqual(stats[("b" * 32, 1)], {"plays": 3, "starred": False, "rating": 0})
+        self.assertEqual(stats[("d" * 32, 1)]["rating"], 5)
         today = b.datetime.datetime(2026, 9, 30, tzinfo=b.datetime.timezone.utc)
         self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32])
         seeds = b.library_seeds([{**r, "tracks": [{**r["tracks"][0], "url": f"https://youtu.be/{r['id'][0] * 11}"}]}
                                  for r in releases], stats)
-        self.assertEqual([(s["name"], s["weight"]) for s in seeds], [("B - Two", 2), ("D - Four", 3)])
+        self.assertEqual([(s["name"], s["weight"]) for s in seeds], [("B - Two", 2), ("D - Four", 4)])
+        # 1-2 stars: never a seed, and a discovery is pruned at once, however new.
+        stats[("c" * 32, 1)] = {"plays": 4, "starred": False, "rating": 2}
+        self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32, "c" * 32])
+        self.assertEqual([b.seed_weight({"rating": r}, "request") for r in (1, 2, 3, 4, 5)], [0, 0, 1, 3, 4])
+        self.assertEqual((b.seed_weight({"starred": True}, "discovery"), b.seed_weight({}, "discovery")), (3, 0))
 
     def test_listening_pages_and_fails_soft(self):
         page = {"status": "ok", "searchResult3": {"song": [{"title": "T", "album": "A", "playCount": 1}]}}
         with patch.object(b, "subsonic", return_value=page) as api:
             self.assertEqual(b.listening([{"id": "a" * 32, "album": "A", "tracks": [{"n": 1, "title": "T"}]}]),
-                             {("a" * 32, 1): {"plays": 1, "starred": False}})
+                             {("a" * 32, 1): {"plays": 1, "starred": False, "rating": 0}})
+            self.assertEqual(api.call_args.kwargs["account"], "NAVIDROME")
+            with patch.dict(os.environ, {"NAVIDROME_LISTENER_USER": "tempo"}):
+                b.listening([])
+            self.assertEqual(api.call_args.kwargs["account"], "NAVIDROME_LISTENER")
         self.assertEqual(api.call_args.args[:2], ("search3", {"query": "", "songCount": 500, "songOffset": 0,
                                                               "artistCount": 0, "albumCount": 0}))
         with patch.object(b, "subsonic", return_value=None):
