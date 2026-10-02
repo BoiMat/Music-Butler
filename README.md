@@ -132,15 +132,16 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   ranks the songs found there by how many (and how loved) seeds lead to them. At
   most 2 songs per artist; songs already in the library, removed before or
   offered 4 times without being picked are skipped. Seeds are your songs in
-  Navidrome: 5 stars (weight 4), 4 stars or starred (3), played twice (2),
-  3 stars, played once, asked for or imported from playlists (1); 1-2 stars is
-  never a seed. Your `seeds` artists and songs steer only while fewer than 12
+  Navidrome: liked (starred) or 5 stars (weight 4), 4 stars (3), played twice
+  (2), 3 stars, played once, asked for or imported from playlists (1); 1-2 stars
+  is never a seed. Your `seeds` artists and songs steer only while fewer than 12
   songs are rated 4+, starred or played twice. After that, your listening steers.
   Ratings and plays are per Navidrome user: set `NAVIDROME_LISTENER_USER` to the
   account you play with (e.g. Tempo's) and put its password in
   `secrets/navidrome_listener_password` (mode 600).
-- **Pruning**: `discover` lists as `stale` the discovered songs you rated 1-2
-  stars, and those older than 4 weeks that were never played, starred or rated. `remove` moves them to the trash and
+- **Pruning**: `discover` lists as `stale` every song you rated 1 star (2 stars
+  stays, but never steers), and discoveries older than 4 weeks that are not
+  liked, not rated and were played fewer than 2 times. `remove` moves them to the trash and
   records them, so they are never suggested again.
 - Imports carry an `origin` (`request`, `playlist`, `seed`, `discovery`). It is
   kept in `provenance.json`, shown by `library` and written as the comment tag

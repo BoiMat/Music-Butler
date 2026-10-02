@@ -612,11 +612,19 @@ class Discovery(unittest.TestCase):
         seeds = b.library_seeds([{**r, "tracks": [{**r["tracks"][0], "url": f"https://youtu.be/{r['id'][0] * 11}"}]}
                                  for r in releases], stats)
         self.assertEqual([(s["name"], s["weight"]) for s in seeds], [("B - Two", 2), ("D - Four", 4)])
-        # 1-2 stars: never a seed, and a discovery is pruned at once, however new.
-        stats[("c" * 32, 1)] = {"plays": 4, "starred": False, "rating": 2}
-        self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32, "c" * 32])
+        # 1 star removes any song at once, however new; 2 stars stays.
+        stats[("c" * 32, 1)] = {"plays": 4, "starred": False, "rating": 1}
+        stats[("d" * 32, 1)] = {"plays": 0, "starred": False, "rating": 1}
+        self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32, "c" * 32, "d" * 32])
+        stats[("c" * 32, 1)]["rating"] = stats[("d" * 32, 1)]["rating"] = 2
+        self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32])
+        # An old discovery played once but not liked or rated goes; twice stays.
+        stats[("a" * 32, 1)] = {"plays": 1, "starred": False, "rating": 0}
+        self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32])
+        stats[("a" * 32, 1)]["plays"] = 2
+        self.assertEqual(b.stale_releases(releases, stats, today), [])
         self.assertEqual([b.seed_weight({"rating": r}, "request") for r in (1, 2, 3, 4, 5)], [0, 0, 1, 3, 4])
-        self.assertEqual((b.seed_weight({"starred": True}, "discovery"), b.seed_weight({}, "discovery")), (3, 0))
+        self.assertEqual((b.seed_weight({"starred": True}, "discovery"), b.seed_weight({}, "discovery")), (4, 0))
 
     def test_listening_pages_and_fails_soft(self):
         page = {"status": "ok", "searchResult3": {"song": [{"title": "T", "album": "A", "playCount": 1}]}}

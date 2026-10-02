@@ -31,9 +31,9 @@ It downloads nothing. The last line is `{"event": "discover", ...}`:
   songs that led here) and `new_artist` (`true` = no song by this artist in the
   library yet). The names can be guessed from a video title and can be wrong
   or swapped (`"I Follow Rivers - Lykke Li"`). Step 3 finds the real names.
-- `stale`: discovered releases the user rated 1-2 stars, or that are older
-  than 4 weeks and were never played, starred or rated. Each has `id`,
-  `artist`, `titles`.
+- `stale`: releases to remove: any song the user rated 1 star, and
+  discoveries older than 4 weeks that are not liked, not rated and were played
+  fewer than 2 times. Each has `id`, `artist`, `titles`.
 - `listening`: `unavailable` means play counts could not be read (then `stale`
   is empty).
 
@@ -47,7 +47,8 @@ and run `REPO/scripts/butler.sh remove <id>`:
 ```
 
 Only remove ids listed in `stale`. Nothing is deleted: they go to the library
-trash, and discovery never offers them again.
+trash, and discovery never offers them again. In the report, list 1-star
+removals separately ("removed, rated 1 star").
 
 ## 3. Choose the songs
 
@@ -111,9 +112,9 @@ Keep it short. It is sent to the user's phone:
 - Removed: stale discoveries moved to the trash.
 - Failed songs in one line, with their `reason`.
 - Bootstrap: how many songs the library has now (`library_songs` + added).
-- Ending: "Rate songs in Tempo: 4-5 stars brings more like them, 1-2 stars
-  removes a discovery. Unrated, unplayed discoveries leave after 4 weeks. New
-  songs are in the *Discover Weekly* playlist."
+- Ending: "Like songs in Tempo to get more like them; 1 star removes a song.
+  Discoveries you don't like, rate or replay leave after 4 weeks. New songs are
+  in the *Discover Weekly* playlist."
 
 If nothing could be added, say why in one line.
 

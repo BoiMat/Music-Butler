@@ -1484,18 +1484,20 @@ def listening(releases):
 
 
 def disliked(s):
-    return 1 <= s.get("rating", 0) <= 2
+    """1 star: the user wants the song gone."""
+    return s.get("rating", 0) == 1
 
 
 def seed_weight(s, origin):
-    """5 stars 4; 4 stars or starred 3; played twice 2; 3 stars, played, asked for or from a
-    playlist 1. Rated 1-2 stars, or discovered and not yet heard: not a seed."""
+    """Liked (starred) or 5 stars 4; 4 stars 3; played twice 2; 3 stars, played, asked for
+    or from a playlist 1. 1-2 stars ("keep, but not this"), or discovered and not yet
+    heard: not a seed."""
     rating = s.get("rating", 0)
-    if disliked(s):
+    if rating in (1, 2):
         return 0
-    if rating == 5:
+    if rating == 5 or s.get("starred"):
         return 4
-    if rating == 4 or s.get("starred"):
+    if rating == 4:
         return 3
     if s.get("plays", 0) >= 2:
         return 2
@@ -1601,21 +1603,21 @@ def score(radios, skip_keys, skip_videos, skip_artists, titles=None):
 
 
 def stale_releases(releases, stats, today):
-    """Discovered releases rated 1-2 stars, or older than STALE_DAYS and never played,
-    starred or rated."""
+    """Releases to remove: any rated 1 star, and discoveries older than STALE_DAYS that
+    are not liked, not rated and played fewer than 2 times."""
     out = []
     for rel in releases:
-        if rel.get("origin") != "discovery" or not rel.get("added"):
-            continue
-        try:
-            added = datetime.datetime.fromisoformat(rel["added"])
-        except ValueError:
-            continue
         heard = [stats.get((rel["id"], t["n"]), {}) for t in rel["tracks"]]
-        if not all(disliked(s) for s in heard):
+        if not (heard and all(disliked(s) for s in heard)):
+            if rel.get("origin") != "discovery" or not rel.get("added"):
+                continue
+            try:
+                added = datetime.datetime.fromisoformat(rel["added"])
+            except ValueError:
+                continue
             if (today - added).days < STALE_DAYS:
                 continue
-            if any(s.get("plays") or s.get("starred") or s.get("rating") for s in heard):
+            if any(s.get("plays", 0) >= 2 or s.get("starred") or s.get("rating") for s in heard):
                 continue
         out.append({"id": rel["id"], "artist": rel["artist"], "titles": [t.get("title") for t in rel["tracks"]],
                     "added": rel["added"][:10]})
