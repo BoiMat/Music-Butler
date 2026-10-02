@@ -235,6 +235,21 @@ and cleaning titles.
 - Not yet seen: a Spotify CSV import live, a scheduled bootstrap/weekly cron
   run, and pruning of a real stale discovery (needs 4 weeks).
 
+## Scheduled runner (2026-10-02) — partially executed
+
+- `scripts/scheduled.sh` replaces the per-machine Hermes cron scripts;
+  `install_hermes_skill.sh` now writes thin wrappers into the profile.
+- `tests/test_scheduled.py` (6 tests: prompts, bootstrap completion once,
+  queued-playlist continuation, failure report, Hermes report from a fake
+  `state.db`, unconfigured agent). Full suite in `music-butler-tools:local`:
+  66 tests, OK (1 skipped).
+- `claude -p --allowedTools ...` from the README example: `scripts/butler.sh status`
+  and `./scripts/butler.sh status` ran, and a write to `requests/` was allowed.
+  `Write(path)` rules are ignored by Claude Code; `Edit(path)` is required. One run
+  called `bash scripts/butler.sh`, which the example rules do not match.
+- Not yet seen: a full scheduled job through `command` mode, or a Hermes cron job
+  through the new wrappers.
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):
