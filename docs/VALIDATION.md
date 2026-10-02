@@ -247,8 +247,31 @@ and cleaning titles.
   and `./scripts/butler.sh status` ran, and a write to `requests/` was allowed.
   `Write(path)` rules are ignored by Claude Code; `Edit(path)` is required. One run
   called `bash scripts/butler.sh`, which the example rules do not match.
-- Not yet seen: a full scheduled job through `command` mode, or a Hermes cron job
-  through the new wrappers.
+- Not yet seen: a Hermes cron job through the new wrappers.
+
+## Fresh-clone quickstart (2026-10-02) — executed on macOS
+
+Cloned `feat/local-ollama-agent` from GitHub into an empty directory and
+followed only the README, as compose project `mbfresh` on port 4599 next to the
+live stack.
+
+- `./scripts/setup.sh` wrote `.env`, created `storage/` and `secrets/` (<1 s);
+  `docker compose up -d` brought Navidrome up healthy; the admin and a non-admin
+  listener were created through Navidrome's API instead of the web form.
+- `docker compose --profile tools build downloader` built cleanly.
+- `python3 scripts/agent.py` (host Python 3.9.6, `OLLAMA_MODEL=gemma4:latest`
+  instead of `qwen2.5:7b`): "add The Entertainer by Scott Joplin" → one lookup,
+  the YouTube Music "Topic" release chosen, imported with cover. Lyrics were
+  `disabled` because `LRCLIB_USER_AGENT` was blank; the quickstart now says to set it.
+- Step 4: `queue` (1-line CSV), `seeds`, `discover` with
+  `NAVIDROME_LISTENER_USER=listener` → `listening: ok`, 34 candidates.
+- `scripts/scheduled.sh bootstrap` with `SCHEDULE_AGENT=command` and the README's
+  `claude -p --allowedTools ...` line: 7 min 48 s, 16 songs added (playlist,
+  seed artist, discoveries; off-taste candidates skipped), report on stdout, no
+  permission denials. 3 YouTube Music releases failed with `media_tool_failed`;
+  the agent re-imported them from the artists' official channel videos (one is a
+  longer music-video edit).
+- Not tested: a Linux host, a phone connection to this test instance.
 
 ## Reproduce
 

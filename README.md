@@ -59,6 +59,10 @@ docker compose --profile tools build downloader  # the download/tag container
 Open **http://localhost:4533** and create the admin account. Then create a
 second, **non-admin** account to listen with.
 
+For synced lyrics, set `LRCLIB_USER_AGENT` in `.env` to an app name plus your
+contact email or project URL, e.g. `music-butler/1.0 (you@example.com)`, as
+[LRCLIB](https://lrclib.net) asks. While it is blank, lyrics lookups are off.
+
 **2. Connect your phone**
 
 Navidrome only listens on `127.0.0.1`. To reach it from your phone, use a VPN or
