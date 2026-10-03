@@ -48,6 +48,13 @@ Check every release for:
 6. **Missing cover** (`"cover": false`) or a cover that is a video frame
    (the source was a music or lyric video, not an "Artist - Topic" upload).
 7. **Missing year** where the release year is known.
+8. **Songwriters listed as artists**: some labels put the writers in the
+   artist credits, so a track's `artists` can hold people who do not perform
+   on it, e.g. `["Bad Bunny", "Benito A. Martinez Ocasio", "Scott Dittrich", ...]`
+   or `["Thegiornalisti", "Tommaso Paradiso", "Dario Faini"]`. Suspect it when a
+   track has more than 4 names, when a name is the main artist's legal name or
+   a member of the band that is the main artist, or when a name is a known
+   songwriter or producer. Lookups return the same list, so they do not settle it.
 
 To confirm the real names, album, year and a clean cover source, look the
 song up. Write `REPO/requests/lookup-<id>.json` with
@@ -101,6 +108,13 @@ real cover, correct tags). Move the other to the library trash: write
 Only remove a release that is really a second copy of a song that stays in the
 library. Never remove a release for any other reason. Nothing is deleted: the
 release goes to the trash folder, from which the user can restore it.
+
+**Songwriters in `artists`**: set `artists` to the performers only, with the
+main artist first, e.g. `{"release": "...", "artists": ["Thegiornalisti"]}`.
+Keep everyone who sings, raps or plays on the track or appears in the title
+as `feat.`, `with`, `&` or `x`, and every name you are unsure about. Remove a
+name only when you know who that person is and that they wrote or produced the
+song rather than performed it. If no name is certain, report the track instead.
 
 **A bad source**: when the audio itself is wrong (a live, sped-up or
 music-video version the user did not ask for, or a different song), do not fix
