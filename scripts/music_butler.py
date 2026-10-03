@@ -42,10 +42,11 @@ CONTINUE_CODES = {65, 69}
 
 
 class Failure(Exception):
-    def __init__(self, reason, code=65, item=None):
+    def __init__(self, reason, code=65, item=None, detail=None):
         super().__init__(reason)
         self.code = code
         self.item = item  # 1-based song number in a "songs" request
+        self.detail = detail  # redacted tool error line, e.g. "ERROR: [youtube] ...: Sign in to confirm ..."
 
 
 def emit(event, **values):
@@ -254,15 +255,25 @@ def fetch(address, *, data=None, headers=None, limit=MAX_RESPONSE, redirect_host
         return body
 
 
+def tool_error(log):
+    """The tool's last ERROR line with URLs removed (they can be signed), or None."""
+    log.seek(0)
+    lines = [line for line in log.read(MAX_RESPONSE).decode("utf-8", "replace").splitlines()
+             if line.startswith("ERROR:") or line.startswith("[error]")]
+    if not lines:
+        return None
+    return re.sub(r"\S*://\S+", "<url>", lines[-1])[:300]
+
+
 def run(argv, cwd, env, timeout=900, stdout=None):
     # Child process group guarantees timeout/cancellation also kills ffmpeg.
-    # Provider output may contain expiring signed URLs: never publish it.
+    # Provider output may contain expiring signed URLs: only a redacted ERROR line leaves.
     with tempfile.TemporaryFile() as log:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=stdout or log, stderr=log, start_new_session=True)
         try:
             if proc.wait(timeout=timeout) != 0:
-                raise Failure("media_tool_failed", 69)
+                raise Failure("media_tool_failed", 69, detail=tool_error(log))
         except subprocess.TimeoutExpired as exc:
             raise Failure("media_tool_timeout", 69) from exc
         finally:
@@ -308,7 +319,24 @@ def download_agent():
     return text(os.environ.get("DOWNLOAD_USER_AGENT") or f"music-butler/{VERSION}", "download_user_agent")
 
 
+DOWNLOAD_RETRY_PAUSE = 20  # seconds; YouTube refuses some downloads during a burst of imports
+
+
 def acquire(track, request, work, env):
+    try:
+        return download(track, work, env)
+    except Failure as exc:
+        if str(exc) != "media_tool_failed":
+            raise
+        emit("warning", reason="download_retry", title=track["title"], detail=exc.detail)
+        time.sleep(DOWNLOAD_RETRY_PAUSE)
+        for leftover in work.iterdir():
+            if leftover.is_file() and not leftover.is_symlink():
+                leftover.unlink()
+        return download(track, work, env)
+
+
+def download(track, work, env):
     source = work / "source.flac"
     # Archives such as Wikimedia reject bots posing as browsers; YouTube needs yt-dlp's default.
     agent = []
@@ -886,6 +914,9 @@ def ingest(request):
         except BaseException as exc:
             receipt["status"] = "published_reconcile_required" if published else "failed"
             receipt["path"] = str(final) if published else None
+            receipt["error"] = str(exc) if isinstance(exc, Failure) else type(exc).__name__
+            if getattr(exc, "detail", None):
+                receipt["detail"] = exc.detail
             with contextlib.suppress(OSError):
                 log_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False), encoding="utf-8")
             if published:
@@ -1734,6 +1765,7 @@ def import_all(releases, skipped=()):
     added, failed, first_code = [], [], 0
     not_attempted = []
     for i, release in enumerate(releases):
+        detail = None
         try:
             result = ingest(release)
             added.append({**describe(release), "scan": result["scan"],
@@ -1742,6 +1774,7 @@ def import_all(releases, skipped=()):
             continue
         except Failure as exc:
             code, reason, published = exc.code, str(exc), getattr(exc, "butler_published", None)
+            detail = exc.detail
         except OSError as exc:
             code, reason, published = 73, "filesystem_or_runtime_error", getattr(exc, "butler_published", None)
         except Exception as exc:  # never dump provider URLs/secrets into the transcript
@@ -1752,7 +1785,8 @@ def import_all(releases, skipped=()):
             # The audio IS in the library; only the receipt/scan step failed. Never re-import it.
             added.append({**describe(release), "warning": "published_check_before_retry"})
         else:
-            failed.append({**describe(release), "reason": reason, "code": code})
+            failed.append({**describe(release), "reason": reason, "code": code,
+                           **({"detail": detail} if detail else {})})
         if code not in CONTINUE_CODES:
             not_attempted = [describe(r) for r in releases[i + 1:]]
             break

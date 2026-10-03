@@ -984,5 +984,51 @@ class Pipeline(unittest.TestCase):
         self.assertEqual((event["listening"], event["stale"]), ("unavailable", []))
 
 
+class DownloadFailures(unittest.TestCase):
+    def test_tool_error_keeps_last_error_line_without_urls(self):
+        script = ("echo 'WARNING: slow https://example.com/w' >&2; "
+                  "echo 'ERROR: [youtube] abc: HTTP Error 403 https://rr1.googlevideo.com/videoplayback?sig=SECRET' >&2; exit 1")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(b.Failure) as caught:
+            b.run(["sh", "-c", script], tmp, {"PATH": os.environ["PATH"]})
+        self.assertEqual(str(caught.exception), "media_tool_failed")
+        self.assertEqual(caught.exception.detail, "ERROR: [youtube] abc: HTTP Error 403 <url>")
+
+    def test_acquire_retries_a_failed_download_once(self):
+        track = {"title": "Song", "url": "https://youtu.be/AAAAAAAAAAA"}
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "source.webm.part").write_bytes(b"partial")
+            outcomes = [b.Failure("media_tool_failed", 69, detail="ERROR: 403"), (work / "source.flac", "yt-dlp")]
+            def fake_download(*args):
+                result = outcomes.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            with patch.object(b, "download", side_effect=fake_download), patch.object(b.time, "sleep") as sleep, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(b.acquire(track, {}, work, {}), (work / "source.flac", "yt-dlp"))
+            sleep.assert_called_once_with(b.DOWNLOAD_RETRY_PAUSE)
+            self.assertFalse((work / "source.webm.part").exists())
+            warning = json.loads(output.getvalue())
+            self.assertEqual((warning["reason"], warning["detail"]), ("download_retry", "ERROR: 403"))
+
+    def test_acquire_gives_up_after_the_retry_and_skips_other_failures(self):
+        track = {"title": "Song", "url": "https://youtu.be/AAAAAAAAAAA"}
+        with tempfile.TemporaryDirectory() as tmp:
+            for failure, calls in ((b.Failure("media_tool_failed", 69), 2), (b.Failure("no_audio_output", 69), 1)):
+                with patch.object(b, "download", side_effect=failure) as download, patch.object(b.time, "sleep"), \
+                        contextlib.redirect_stdout(io.StringIO()), self.assertRaises(b.Failure):
+                    b.acquire(track, {}, Path(tmp), {})
+                self.assertEqual(download.call_count, calls)
+
+    def test_failed_release_reports_tool_detail(self):
+        releases = b.parse({"songs": [{"artist": "A", "title": "S1", "url": "https://youtu.be/s1"}]})
+        failure = b.Failure("media_tool_failed", 69, detail="ERROR: [youtube] s1: Sign in to confirm")
+        with patch.object(b, "ingest", side_effect=failure), contextlib.redirect_stdout(io.StringIO()) as output:
+            b.import_all(releases)
+        summary = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(summary["failed"][0]["detail"], "ERROR: [youtube] s1: Sign in to confirm")
+
+
 if __name__ == "__main__":
     unittest.main()
