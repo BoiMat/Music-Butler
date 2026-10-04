@@ -597,6 +597,13 @@ class Discovery(unittest.TestCase):
         self.assertEqual((rows[1]["artists"], rows[1]["search"]), (["Daft Punk", "Pharrell Williams"], "Daft Punk Get Lucky"))
         self.assertEqual(len(rows), 2)
         self.assertEqual(b.parse_playlist(b"Title,Artist\nSong,Someone, Else\n")[0]["artist"], "Someone")
+        italian = ('"URI della traccia","Nome della traccia","URI dell\'artista","Nome dell\'artista","URI dell\'album",'
+                   '"Nome dell\'album","URI dell\'artista dell\'album","Nome dell\'artista dell\'album",'
+                   '"Data di rilascio dell\'album","Durata della traccia (ms)"\n'
+                   '"spotify:track:1","Pepas","spotify:artist:1","Farruko","spotify:album:1","La 167",'
+                   '"spotify:artist:2","Various","2019-06-24","287000"\n').encode()
+        self.assertEqual(b.parse_playlist(italian)[0], {"artist": "Farruko", "title": "Pepas", "search": "Farruko Pepas",
+                                                        "album": "La 167", "year": 2019, "duration": 287})
         for bad in (b"Name\nx\n", b"Track Name,Artist Name(s)\n", b"\xff\xfe"):
             with self.subTest(bad=bad), self.assertRaises((b.Failure, UnicodeError)):
                 b.parse_playlist(bad)

@@ -1548,13 +1548,14 @@ def parse_playlist(raw):
     if len(rows) < 2:
         raise Failure("empty_playlist")
     header = {h.strip().casefold(): i for i, h in enumerate(rows[0])}
-    title_col = column(header, "track name", "track", "title", "song", "name")
-    artist_col = column(header, "artist name(s)", "artist name", "artists", "artist")
+    # Exportify translates its headers to the browser's language: English and Italian here.
+    title_col = column(header, "track name", "track", "title", "song", "name", "nome della traccia", "titolo")
+    artist_col = column(header, "artist name(s)", "artist name", "artists", "artist", "nome dell'artista", "artista")
     if title_col is None or artist_col is None:
         raise Failure("playlist_needs_track_and_artist_columns")
-    album_col = column(header, "album name", "album")
-    date_col = column(header, "release date", "album release date", "year")
-    ms_col = column(header, "duration (ms)", "duration_ms", "track duration (ms)")
+    album_col = column(header, "album name", "album", "nome dell'album")
+    date_col = column(header, "release date", "album release date", "year", "data di rilascio dell'album")
+    ms_col = column(header, "duration (ms)", "duration_ms", "track duration (ms)", "durata della traccia (ms)")
     out = []
     for row in rows[1:MAX_QUEUE + 1]:
         def cell(i):
