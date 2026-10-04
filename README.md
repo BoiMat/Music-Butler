@@ -34,9 +34,8 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   your taste ("Italian pop, no trap").
 - **Weekly discovery**: new songs from the YouTube Music radios of songs you
   liked or rated highly, at least 5 by artists new to you, in a
-  *Discover Weekly* playlist. 1★ removes a song. After four weeks, a discovery
-  you have not liked, rated or played twice is removed; *Discoveries to rate*
-  lists the ones still waiting.
+  *Discover Weekly* playlist. Giving a song 1★ is the only way it leaves the
+  library; nothing is removed by age or play count.
 - **Weekly audit**: a stronger model checks tags and covers and fixes what it is
   sure about, and lyrics are retried for songs that had none (LRCLIB grows).
 - **Safe defaults**: hardened containers (read-only, no capabilities, non-root),
@@ -110,7 +109,7 @@ prints its report:
 | Job | Suggested schedule | What it does |
 | --- | --- | --- |
 | `bootstrap` | daily | adds up to 25 songs (playlist queue first) until the library holds `BOOTSTRAP_TARGET` songs and the queue is empty, then reports once and stays silent |
-| `weekly` | weekly | removes stale discoveries, adds 15 new songs |
+| `weekly` | weekly | removes songs you rated 1★, adds 15 new songs |
 | `audit` | weekly | retries missing lyrics, fixes certain tag, cover and duplicate problems, reports the rest |
 
 Choose the agent in `.env`:

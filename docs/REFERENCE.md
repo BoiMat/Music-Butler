@@ -120,31 +120,26 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   Ratings and plays are per Navidrome user: set `NAVIDROME_LISTENER_USER` to the
   account you play with (e.g. Tempo's) and put its password in
   `secrets/navidrome_listener_password` (mode 600).
-- **Pruning**: `discover` lists as `stale` every song you rated 1 star (2 stars
-  stays, but never steers), and discoveries older than 4 weeks that are not
-  liked, not rated and were played fewer than 2 times. `remove` moves them to the trash and
-  records them, so they are never suggested again.
+- **Removing**: `discover` lists as `stale` every song you rated 1 star (2 stars
+  stays, but never steers). Nothing leaves by age or play count: with shuffle over
+  a growing library, a month without a play is chance, not a verdict. `remove`
+  moves them to the trash and records them, so they are never suggested again.
 - Imports carry an `origin` (`request`, `playlist`, `seed`, `discovery`). It is
   kept in `provenance.json`, shown by `library` and written as the comment tag
   `music-butler:<origin>`. Bulk origins skip songs already in the library
   instead of failing the request.
-- Two playlists show the discoveries in Tempo:
-  - *Discover Weekly*: a Navidrome smart playlist (`.nsp` in the music folder,
-    written by `discover`) of the discoveries of the last 7 days. Smart
-    playlists belong to the admin; `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes it
-    visible to the Tempo account.
-  - *Discoveries to rate*: a normal playlist of the listening account with the
-    discoveries that are not liked, rated or played twice yet, i.e. the ones that
-    leave after 4 weeks unless you act. A smart playlist cannot express this:
-    its rating and play rules use the owner's (admin's) data.
-  Navidrome re-evaluates a smart playlist only when its owner opens it, so
-  `scheduled.sh` runs `butler.sh playlists` after every job: it waits for the
-  scan, opens *Discover Weekly* as the admin and rebuilds *Discoveries to rate*.
+- *Discover Weekly* is a Navidrome smart playlist (`.nsp` in the music folder,
+  written by `discover`) of the discoveries of the last 7 days: play it on
+  Sunday and give 1 star to what you do not want. Smart playlists belong to the
+  admin; `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes it visible to the Tempo
+  account. Navidrome re-evaluates a smart playlist only when its owner opens it,
+  so `scheduled.sh` runs `butler.sh playlists` after every job: it waits for the
+  scan and opens it as the admin.
 - State lives in `<library>/discovery/` (`seeds.json`, `queue.json`,
   `history.json`) and is backed up with the library.
 
 [`skills/music-discover/SKILL.md`](../skills/music-discover/SKILL.md) is the agent
-side: it runs `discover`, removes stale songs, chooses the songs (playlist queue,
+side: it runs `discover`, removes 1-star songs, chooses the songs (playlist queue,
 then well-known songs of seed artists, then candidates fitting your notes), looks
 them up and adds them with their origin. Run it on a schedule with
 [`scripts/scheduled.sh`](../README.md#scheduled-runs): a daily bootstrap job (25 songs a

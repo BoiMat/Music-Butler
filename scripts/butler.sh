@@ -22,8 +22,8 @@ Usage: scripts/butler.sh <command>
   lyrics           retry synced lyrics (LRCLIB) for every song without them
   playlists        after imports: wait for the scan, refresh Discover Weekly etc.
   remove <id>      move releases in requests/remove-<id>.json to the library trash
-  discover         songs to add next: playlist queue, radio candidates, stale
-                   discoveries (JSON; downloads nothing)
+  discover         songs to add next: playlist queue, radio candidates, songs
+                   rated 1 star to remove (JSON; downloads nothing)
   seeds <id>       merge taste seeds from requests/seeds-<id>.json
   queue <id>       queue the songs of requests/spotify-<id>.csv (an Exportify export)
   drives           list mounted external drives (macOS /Volumes, Linux /media)

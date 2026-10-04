@@ -31,13 +31,12 @@ It downloads nothing. The last line is `{"event": "discover", ...}`:
   songs that led here) and `new_artist` (`true` = no song by this artist in the
   library yet). The names can be guessed from a video title and can be wrong
   or swapped (`"I Follow Rivers - Lykke Li"`). Step 3 finds the real names.
-- `stale`: releases to remove: any song the user rated 1 star, and
-  discoveries older than 4 weeks that are not liked, not rated and were played
-  fewer than 2 times. Each has `id`, `artist`, `titles`.
+- `stale`: releases to remove: the songs the user rated 1 star. Nothing else
+  is ever removed. Each has `id`, `artist`, `titles`.
 - `listening`: `unavailable` means play counts could not be read (then `stale`
   is empty).
 
-## 2. Remove stale discoveries
+## 2. Remove 1-star songs
 
 If `stale` is not empty, write `REPO/requests/remove-<id>.json` with their ids
 and run `REPO/scripts/butler.sh remove <id>`:
@@ -47,8 +46,8 @@ and run `REPO/scripts/butler.sh remove <id>`:
 ```
 
 Only remove ids listed in `stale`. Nothing is deleted: they go to the library
-trash, and discovery never offers them again. In the report, list 1-star
-removals separately ("removed, rated 1 star").
+trash, and discovery never offers them again. In the report, list them as
+"removed, rated 1 star".
 
 ## 3. Choose the songs
 
@@ -109,12 +108,11 @@ This is the music-butler flow. Its rules apply here too.
 Keep it short. It is sent to the user's phone:
 - Added: `Artist - Title`, and for discoveries `(because you like <because[0]>)`.
   Group by origin: from your playlists / from your artists / new discoveries.
-- Removed: stale discoveries moved to the trash.
+- Removed: songs rated 1 star, moved to the trash.
 - Failed songs in one line, with their `reason`.
 - Bootstrap: how many songs the library has now (`library_songs` + added).
 - Ending: "Like songs in Tempo to get more like them; 1 star removes a song.
-  Discoveries you don't like, rate or replay leave after 4 weeks. New songs are
-  in the *Discover Weekly* playlist."
+  New songs are in the *Discover Weekly* playlist."
 
 If nothing could be added, say why in one line.
 
