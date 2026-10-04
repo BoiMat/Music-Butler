@@ -121,6 +121,10 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   `<library>/discovery/imports/<id>.json`, so a stopped import continues where it
   stopped and failed songs are not retried; a busy library (another import) is
   waited for. `playlist <id>` again while it runs prints the last report.
+  When the import finishes, the listening account gets a Navidrome playlist of the
+  same name (the file name for a CSV sent to the agent, else the id in title case)
+  with the songs in the CSV's order, so Tempo shows it; running `playlist <id>`
+  again on an imported playlist only refreshes that playlist.
   `inbox` picks up CSVs the user sent to the agent: Hermes saves Telegram files
   in its profile's `cache/documents`, which `PLAYLIST_INBOX` points to.
   `queue` is the slow alternative: the daily bootstrap job adds 25 queued songs

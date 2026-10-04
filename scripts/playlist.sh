@@ -8,7 +8,8 @@
 #   PLAYLIST_NOTIFY    command that reads a report on stdin, split on spaces, e.g.
 #                      hermes -p music-butler send --to telegram --quiet
 #   PLAYLIST_INBOX     folder to pick new playlist CSVs up from
-#   PLAYLIST_IMPORTER  importer command (default: the downloader container; tests)
+#   PLAYLIST_IMPORTER, PLAYLIST_SYNCER  importer commands (default: the downloader
+#                      container; tests replace them)
 set -Eeuo pipefail
 IFS=$'\n\t'
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
@@ -58,6 +59,34 @@ import_batch() {  # import_batch <id>: one batch; prints the importer's last lin
     fi
 }
 
+sync_playlist() {  # sync_playlist <id>: the user's Navidrome playlist of the same name
+    local syncer name
+    name="$(cat "requests/spotify-$1.name" 2>/dev/null || true)"
+    name="${name:-$(printf '%s' "$1" | tr '-' ' ' | awk '{ for (i = 1; i <= NF; i++) $i = toupper(substr($i, 1, 1)) substr($i, 2) } 1')}"
+    syncer="$(setting PLAYLIST_SYNCER)"
+    if [[ -n "$syncer" ]]; then
+        IFS=' ' read -r -a cmd <<< "$syncer"
+        "${cmd[@]}" "$1" "$name" < "requests/spotify-$1.csv" | tail -n 1
+    else
+        docker compose --progress quiet run --rm -T downloader --playlist-sync "$1" --name "$name" \
+            < "requests/spotify-$1.csv" | tail -n 1
+    fi
+}
+
+sync_line() {  # sync_line <sync summary JSON>: one line for the final report
+    python3 - "$1" <<'PY'
+import json, sys
+try:
+    s = json.loads(sys.argv[1])
+except ValueError:
+    s = {}
+if s.get("ok"):
+    print('Tempo playlist "%s": %d songs.' % (s["playlist"], s["songs"]))
+else:
+    print("The Tempo playlist could not be updated: %s." % (s.get("reason") or "no answer"))
+PY
+}
+
 # report <id> <summary JSON> <totals file>: prints "remaining<TAB>stop?" then the
 # message; keeps running totals of what failed or had no certain match.
 report() {
@@ -103,7 +132,7 @@ PY
 }
 
 run() {
-    local id="$1" out text head remaining busy=0 totals
+    local id="$1" out text head remaining busy=0 totals synced
     echo "$$" > "requests/.playlist-$id.pid"
     totals="requests/.playlist-$id.totals"
     rm -f "$totals"
@@ -122,11 +151,16 @@ run() {
             fi
             text=$'0\tstop\n'"Playlist $id: stopped, the library stayed busy for 30 minutes. Start it again to continue."
         fi
-        notify "$id" "${text#*$'\n'}"
         [[ "$head" == *$'\t'more && "$remaining" != 0 ]] || break
+        notify "$id" "${text#*$'\n'}"
     done
-    # Navidrome should list the new songs before the user looks (and Discover Weekly).
-    scripts/butler.sh playlists > /dev/null 2>&1 || true
+    if [[ "$head" == *$'\t' ]]; then  # finished, not stopped
+        # Wait for Navidrome to list the new songs, then (re)build the Tempo playlist.
+        scripts/butler.sh playlists > /dev/null 2>&1 || true
+        synced="$(sync_playlist "$id" 2>/dev/null || true)"
+        text+=$'\n'"$(sync_line "$synced")"
+    fi
+    notify "$id" "${text#*$'\n'}"
 }
 
 start() {
@@ -175,6 +209,8 @@ inbox() {
             n=$((n + 1))
         done
         cp -- "$file" "requests/spotify-$id.csv"
+        # The file's own name, for the Tempo playlist: "My Summer Mix!", not my-summer-mix.
+        printf '%s' "$(printf '%s' "$name" | LC_ALL=C tr -d '\000-\037' | cut -c1-100)" > "requests/spotify-$id.name"
         printf 'New playlist: %s (%s songs)\n' "$id" "$(( $(grep -c '' "requests/spotify-$id.csv") - 1 ))"
         found=1
     done

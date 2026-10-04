@@ -33,8 +33,12 @@ class PlaylistRunner(unittest.TestCase):
         notify = self.home / "notify.sh"
         notify.write_text(f'#!/bin/sh\ncat >> "{self.sent}"\necho "----" >> "{self.sent}"\n')
         notify.chmod(0o755)
+        syncer = self.home / "syncer.sh"  # records the call; answers like --playlist-sync
+        syncer.write_text(f'#!/bin/sh\ncat > /dev/null\necho "$1|$2" >> "{self.home}/synced"\n'
+                          'echo \'{"event": "summary", "ok": true, "playlist": "\'"$2"\'", "songs": 12, "of": 13}\'\n')
+        syncer.chmod(0o755)
         self.env = dict(os.environ, PLAYLIST_INBOX=str(self.inbox), PLAYLIST_NOTIFY=str(notify),
-                        PLAYLIST_BUSY_WAIT="0")
+                        PLAYLIST_BUSY_WAIT="0", PLAYLIST_SYNCER=str(syncer))
 
     def script(self, *args, **env):
         return subprocess.run([str(self.home / "scripts" / "playlist.sh"), *args], env={**self.env, **env},
@@ -61,6 +65,7 @@ json.dump(lines, open(path, "w"))
         out = self.script("inbox").stdout
         self.assertIn("New playlist: my-summer-mix (2 songs)", out)
         self.assertIn("New playlist: best-hits-2026 (1 songs)", out)
+        self.assertEqual((self.home / "requests" / "spotify-my-summer-mix.name").read_text(), "My Summer Mix!")
         self.assertEqual(self.script("inbox").stdout, "No new playlist in the inbox.\n")
         # Same name, different songs: a new id, the old playlist is kept.
         (self.inbox / "Best Hits 2026.csv").write_text("Track Name,Artist Name(s)\nG,H\n")
@@ -83,6 +88,8 @@ json.dump(lines, open(path, "w"))
         self.assertIn("+1 imported, 13 of 30 songs in the library, import finished.", reports[1])
         self.assertIn("No certain match: D - 5", reports[1])
         self.assertIn("In total 1 failed and 1 had no certain match", reports[1])
+        self.assertIn('Tempo playlist "Mix": 12 songs.', reports[1])
+        self.assertEqual((self.home / "synced").read_text(), "mix|Mix\n")
         self.assertIn("import finished", (self.home / "requests" / "spotify-mix.log").read_text())
         self.assertEqual(sorted(p.name for p in (self.home / "requests").glob(".playlist-*")), [])
 
@@ -91,6 +98,7 @@ json.dump(lines, open(path, "w"))
         importer = self.importer(json.dumps({"event": "error", "code": 73, "reason": "insufficient_free_space"}))
         self.script("run", "mix", PLAYLIST_IMPORTER=importer)
         self.assertIn("stopped, the importer said insufficient_free_space (code 73)", self.sent.read_text())
+        self.assertFalse((self.home / "synced").exists())  # no playlist from a stopped import
 
     def test_start_returns_at_once_and_reports_progress_while_running(self):
         (self.home / "requests" / "spotify-mix.csv").write_text("Track Name,Artist Name(s)\nA,B\nC,D\n")

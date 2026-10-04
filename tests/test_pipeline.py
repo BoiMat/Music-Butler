@@ -1221,15 +1221,16 @@ class PlaylistImport(unittest.TestCase):
             artist, title = q.split(" ", 1)
             return [] if title.startswith("Unknown") else [music_result(f"{abs(hash(title)) % 10**11:011d}", artist, title, 200)]
         def fake_import(releases):
-            failed, outs = [], []
-            for rel in releases:
+            added, failed, outs = [], [], []
+            for n, rel in enumerate(releases):
                 result = outcomes.get(rel["tracks"][0]["title"], "added")
                 if result == "added":
+                    added.append({**b.describe(rel), "path": f"/library/music/x--{n:032x}"})
                     outs.append("added")
                 else:
                     failed.append({**b.describe(rel), "reason": result[0], "code": result[1]})
                     outs.append("failed")
-            return [], failed, [], next((f["code"] for f in failed), 0), outs
+            return added, failed, [], next((f["code"] for f in failed), 0), outs
         with patch.object(b, "youtube_music", side_effect=fake_search), \
                 patch.object(b, "import_releases", side_effect=fake_import) as imported, \
                 patch.object(b.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("142.250.1.1", 443))]), \
@@ -1253,6 +1254,7 @@ class PlaylistImport(unittest.TestCase):
         self.assertEqual((second["not_matched"], second["remaining"]), (["Artist - Unknown song"], 0))
         state = json.loads((self.root / "discovery" / "imports" / "mix.json").read_text())
         self.assertEqual(set(state["given_up"].values()), {"media_tool_failed", "no_certain_match"})
+        self.assertEqual(len(state["releases"]), 22)  # where each imported song went, for the Tempo playlist
 
     def test_busy_library_stops_without_giving_up(self):
         csv = b"Track Name,Artist Name(s)\nSong A,Artist\nSong B,Artist\n"
@@ -1260,6 +1262,35 @@ class PlaylistImport(unittest.TestCase):
         self.assertEqual((code, summary["stopped"], summary["remaining"], summary["failed"]), (75, "busy_retry_later", 1, []))
         state = json.loads((self.root / "discovery" / "imports" / "mix.json").read_text())
         self.assertEqual(state["given_up"], {})  # both songs are tried again next time
+
+
+class SyncPlaylist(unittest.TestCase):
+    def test_listeners_playlist_follows_the_csv_order(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "discovery" / "imports").mkdir(parents=True)
+        # "b" was imported under YouTube Music's names; the import remembered its release.
+        (root / "discovery" / "imports" / "mix.json").write_text(json.dumps({"releases": {b.song_key("B", "Two"): "b" * 32}}))
+        releases = [{"id": "a" * 32, "artist": "A", "album": "One", "tracks": [{"n": 1, "title": "One", "artist": "A", "duration": 200}]},
+                    {"id": "b" * 32, "artist": "B feat. C", "album": "Two (Deluxe)", "tracks": [{"n": 1, "title": "Two - Remastered", "duration": 180}]}]
+        songs = [{"id": "nd-a", "album": "One", "title": "One", "duration": 200},
+                 {"id": "nd-b", "album": "Two (Deluxe)", "title": "Two - Remastered", "duration": 180}]
+        calls = []
+        def fake_subsonic(endpoint, params=None, account=None, **kwargs):
+            calls.append((endpoint, params))
+            return {"playlists": {"playlist": [{"id": "p1", "name": "Mix", "owner": "tempo"},
+                                               {"id": "x", "name": "Mix", "owner": "someone"}]}} if endpoint == "getPlaylists" else {}
+        csv = b"Track Name,Artist Name(s)\nTwo,B\nOne,A\nMissing,Z\nOne,A\n"
+        with patch.dict(os.environ, {"LIBRARY_ROOT": str(root), "NAVIDROME_LISTENER_USER": "tempo"}), \
+                patch.object(b, "read_library", return_value=releases), patch.object(b, "navidrome_songs", return_value=songs), \
+                patch.object(b, "subsonic", side_effect=fake_subsonic), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.sync_playlist("mix", "Mix", csv), 0)
+        self.assertIn(("createPlaylist", {"playlistId": "p1", "songId": ["nd-b", "nd-a"]}), calls)
+        self.assertEqual(json.loads(output.getvalue()), {"event": "summary", "ok": True, "playlist": "Mix", "songs": 2, "of": 3})
+        with patch.dict(os.environ, {"LIBRARY_ROOT": str(root)}), patch.object(b, "read_library", return_value=releases), \
+                patch.object(b, "navidrome_songs", return_value=None), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.sync_playlist("mix", "Mix", csv), 69)
+        self.assertEqual(json.loads(output.getvalue())["reason"], "navidrome_unavailable")
 
 
 if __name__ == "__main__":

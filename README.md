@@ -33,6 +33,7 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   [Exportify](https://exportify.app)) to the bot. It imports every song in the
   background and reports every 20 songs. Each song is matched to YouTube Music
   by artist, title and length, and anything uncertain is listed instead of guessed.
+  At the end the playlist appears in Tempo under its own name.
 - **Taste**: a few artists and a few words ("Italian pop, no trap") steer
   discovery until your own likes and ratings take over.
 - **Weekly discovery**: new songs from the YouTube Music radios of songs you

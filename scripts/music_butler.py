@@ -1641,6 +1641,7 @@ def import_playlist(playlist, raw):
     # Imported songs are recorded too: the library knows them by YouTube Music's names,
     # which can differ from Spotify's, so the library alone cannot say they are done.
     finished = set(state.get("done")) if isinstance(state.get("done"), list) else set()
+    placed = state.get("releases") if isinstance(state.get("releases"), dict) else {}  # key -> release id
     idx = library_index(read_library())
     gone, _ = blocked(read_state(root, "history.json", {}))
     seen, todo, in_library = set(), [], 0
@@ -1681,14 +1682,17 @@ def import_playlist(playlist, raw):
     skipped = check_library(releases)  # e.g. the same song under another playlist title
     finished |= {keys[id(r)] for r in checked if not any(r is kept for kept in releases)}
     with contextlib.redirect_stdout(io.StringIO()):  # one summary line per batch, not one per step
-        _, failures, not_attempted, code, outcomes = import_releases(releases) if releases else ([], [], [], 0, [])
-    failures = iter(failures)  # in release order, one per "failed" outcome
+        added, failures, not_attempted, code, outcomes = import_releases(releases) if releases else ([], [], [], 0, [])
+    failures, added = iter(failures), iter(added)  # in release order, one per outcome of that kind
     done, retry, stopped = [], 0, None
     for release, outcome in zip(releases, outcomes):
         name = f"{release['artist']} - {release['tracks'][0]['title']}"
         if outcome == "added":
             done.append(name)
             finished.add(keys[id(release)])
+            path = next(added).get("path") or ""
+            if RELEASE_DIR.search(path):
+                placed[keys[id(release)]] = RELEASE_DIR.search(path).group(1)
         elif outcome == "failed":
             failure = next(failures)
             if failure["code"] not in CONTINUE_CODES:
@@ -1700,7 +1704,7 @@ def import_playlist(playlist, raw):
             given_up[keys[id(release)]] = failure["reason"]
         else:
             retry += 1
-    write_json(state_path, {"given_up": given_up, "done": sorted(finished)})
+    write_json(state_path, {"given_up": given_up, "done": sorted(finished), "releases": placed})
     emit("summary", ok=not failed and not not_matched and not stopped, playlist=playlist,
          **({"stopped": stopped} if stopped else {}),
          added=done, failed=failed, not_matched=not_matched,
@@ -1708,6 +1712,45 @@ def import_playlist(playlist, raw):
          remaining=len(todo) - len(batch) + retry, songs=len(seen),
          in_library=in_library + len(done) + len(skipped))
     return code if stopped else 0
+
+
+def sync_playlist(playlist, name, raw):
+    """Create or update the listener's Navidrome playlist `name` with the songs of a
+    playlist CSV that are in the library, in the CSV's order (Tempo shows it)."""
+    entries = parse_playlist(raw)
+    root = library_root()
+    state = read_state(root, f"imports/{playlist}.json", {})
+    placed = state.get("releases") if isinstance(state.get("releases"), dict) else {}
+    releases = read_library()
+    by_key = {}
+    for rel in releases:
+        for t in rel["tracks"]:
+            for artist in (rel["artist"], t.get("artist")):
+                if artist and t.get("title"):
+                    by_key.setdefault(song_key(artist, t["title"]), (rel["id"], t["n"]))
+    songs = navidrome_songs()
+    if songs is None:
+        emit("summary", ok=False, reason="navidrome_unavailable", playlist=name)
+        return 69
+    ids = {where: song["id"] for where, song in match_songs(releases, songs) if isinstance(song.get("id"), str)}
+    order, wanted = [], set()
+    for entry in entries:
+        key = song_key(entry["artist"], entry["title"])
+        if key in wanted:
+            continue
+        wanted.add(key)
+        song = ids.get((placed[key], 1) if key in placed else by_key.get(key))
+        if song and song not in order:
+            order.append(song)
+    account = listener_account()
+    owner = os.environ.get(account + "_USER")
+    mine = [p for p in (subsonic("getPlaylists", account=account) or {}).get("playlists", {}).get("playlist", [])
+            if p.get("name") == name and p.get("owner") == owner]
+    if order:
+        params = {"playlistId": mine[0]["id"]} if mine else {"name": name}
+        subsonic("createPlaylist", {**params, "songId": order}, account=account)
+    emit("summary", ok=True, playlist=name, songs=len(order), of=len(wanted))
+    return 0
 
 
 def interleave(old, new):
@@ -1718,21 +1761,27 @@ def interleave(old, new):
     return [q for _, _, q in sorted(spread, key=lambda item: item[:2])]
 
 
-def track_stats(releases, songs):
-    """Navidrome songs (fake paths) -> {(release id, track n): {"plays", "starred"}}, matched
-    on album + title and the nearest duration."""
+def match_songs(releases, songs):
+    """Pairs ((release id, track n), Navidrome song). Navidrome reports fake paths, so
+    songs are matched on album + title and the nearest duration."""
     index = {}
     for rel in releases:
         for t in rel["tracks"]:
             if t.get("title"):
                 index.setdefault((norm(rel["album"]), norm(t["title"])), []).append((rel["id"], t["n"], t.get("duration") or 0))
-    stats = {}
     for song in songs:
         found = index.get((norm(song.get("album")), norm(song.get("title"))))
         if not found:
             continue
         duration = song.get("duration") if isinstance(song.get("duration"), (int, float)) else 0
         rid, n, _ = min(found, key=lambda f: abs(f[2] - duration))
+        yield (rid, n), song
+
+
+def track_stats(releases, songs):
+    """Navidrome songs -> {(release id, track n): {"plays", "starred", "rating"}}."""
+    stats = {}
+    for (rid, n), song in match_songs(releases, songs):
         plays = song.get("playCount") if isinstance(song.get("playCount"), int) else 0
         rating = song.get("userRating") if isinstance(song.get("userRating"), int) else 0
         entry = stats.setdefault((rid, n), {"plays": 0, "starred": False, "rating": 0})
@@ -1742,10 +1791,21 @@ def track_stats(releases, songs):
     return stats
 
 
+def listener_account():
+    """The account the user plays with (e.g. Tempo's), else the admin."""
+    return "NAVIDROME_LISTENER" if os.environ.get("NAVIDROME_LISTENER_USER") else "NAVIDROME"
+
+
 def listening(releases):
-    """Play counts, stars and ratings of the listening account (e.g. the one Tempo uses;
-    the admin account if none is configured), or None when Navidrome cannot be asked."""
-    account = "NAVIDROME_LISTENER" if os.environ.get("NAVIDROME_LISTENER_USER") else "NAVIDROME"
+    """Play counts, stars and ratings of the listening account, or None when Navidrome
+    cannot be asked."""
+    songs = navidrome_songs()
+    return None if songs is None else track_stats(releases, songs)
+
+
+def navidrome_songs():
+    """Every song as the listening account sees it (with its plays and ratings), or None."""
+    account = listener_account()
     songs, offset = [], 0
     try:
         while offset < 50000:
@@ -1763,7 +1823,7 @@ def listening(releases):
         if isinstance(exc, Failure) and exc.code in (130, 143):
             raise
         return None
-    return track_stats(releases, songs)
+    return songs
 
 
 def disliked(s):
@@ -2020,7 +2080,7 @@ def import_releases(releases):
         detail = None
         try:
             result = ingest(release)
-            added.append({**describe(release), "scan": result["scan"],
+            added.append({**describe(release), "scan": result["scan"], "path": result["path"],
                           "songs": [{"title": t["title"], "lyrics": t["lyrics"], "artwork": t["artwork"]}
                                     for t in result["tracks"]]})
             outcomes.append("added")
@@ -2067,6 +2127,9 @@ def main():
                       help='Move {"releases": [...]} to the library trash; nothing is deleted')
     mode.add_argument("--playlist", metavar="ID",
                       help="Import the next songs of a playlist CSV from stdin (Exportify); ID names its progress")
+    mode.add_argument("--playlist-sync", metavar="ID",
+                      help="Create/update the listener's Navidrome playlist from a playlist CSV on stdin")
+    parser.add_argument("--name", help="Playlist name for --playlist-sync (default: from the ID)")
     mode.add_argument("--playlists", action="store_true",
                       help="Wait for the scan, then refresh the smart playlists as their owner; reads no stdin")
     mode.add_argument("--lyrics", action="store_true",
@@ -2087,7 +2150,7 @@ def main():
             return missing_lyrics()
         if args.playlists:
             return refresh_playlists()
-        limit = MAX_PLAYLIST if args.queue or args.playlist is not None else MAX_REQUEST
+        limit = MAX_PLAYLIST if args.queue or args.playlist is not None or args.playlist_sync is not None else MAX_REQUEST
         raw = sys.stdin.buffer.read(limit + 1)
         if len(raw) > limit:
             raise Failure("request_too_large")
@@ -2097,6 +2160,11 @@ def main():
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", args.playlist):
                 raise Failure("invalid_playlist_id", 64)
             return import_playlist(args.playlist, raw)
+        if args.playlist_sync is not None:
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", args.playlist_sync):
+                raise Failure("invalid_playlist_id", 64)
+            name = text(args.name or args.playlist_sync.replace("-", " ").title(), "playlist_name", limit=100)
+            return sync_playlist(args.playlist_sync, name, raw)
         if args.seeds:
             return merge_seeds(validate_seeds(json.loads(raw)))
         if args.lookup:
