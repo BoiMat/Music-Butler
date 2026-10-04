@@ -419,9 +419,22 @@ def release_song(entry):
     if clip(entry.get("album")):
         song["album"] = clip(entry.get("album"))
     year = entry.get("release_year")
+    if not (isinstance(year, int) and not isinstance(year, bool)):
+        year = description_year(entry.get("description"))
     if isinstance(year, int) and not isinstance(year, bool) and 1000 <= year <= 2100:
         song["year"] = year
     return song
+
+
+def description_year(description):
+    """The release year from a YouTube Music auto-generated description, when yt-dlp
+    leaves release_year empty: "Released on: 2021-06-25", else the release's
+    "℗ 2021" line (the year of that release, e.g. a remaster's)."""
+    if not isinstance(description, str):
+        return None
+    found = (re.search(r"^Released on: (\d{4})-\d{2}-\d{2}", description, re.M)
+             or re.search(r"℗ (\d{4})\b", description))
+    return int(found.group(1)) if found else None
 
 
 def validate_lookup(data, resolve=False):

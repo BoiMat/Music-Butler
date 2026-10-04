@@ -251,6 +251,16 @@ class NetworkMocks(unittest.TestCase):
             self.assertEqual(b.Lyrics(self.root).get(req, track, 200, dest), "synced")
             self.assertEqual(dest.with_suffix(".lrc").read_text(), "[00:01.00]Right")
 
+    def test_release_year_falls_back_to_the_description(self):
+        entry = {"artists": ["Ed Sheeran"], "track": "Bad Habits", "album": "Bad Habits"}
+        for description, year in [
+                ("Provided to YouTube by X\n\nReleased on: 2021-06-25\n\n℗ 2020 Label", 2021),
+                ("Bad Habits · Ed Sheeran\n\n℗ An Asylum release, ℗ 2021 Warner Music UK Limited", 2021),
+                ("No dates here", None), (None, None)]:
+            with self.subTest(description=description):
+                self.assertEqual(b.release_song({**entry, "description": description}).get("year"), year)
+        self.assertEqual(b.release_song({**entry, "release_year": 2019, "description": "℗ 2021 X"})["year"], 2019)
+
     def test_validate_lookup(self):
         self.assertEqual(b.validate_lookup({"search": "Daft Punk Get Lucky"}),
                          {"search": ["Daft Punk Get Lucky"], "urls": []})
