@@ -283,8 +283,11 @@ live stack.
 - Spot checks: "Overkill - Acoustic Version" matched the acoustic release;
   "Turn The Lights Off - Radio Edit" (179 s) matched YouTube Music's "(Album
   Version)" at the same length.
-- Not yet seen: a CSV sent to the bot on Telegram (`butler.sh inbox`), and an
-  import waiting for a busy library outside the tests.
+- A CSV sent to the bot on Telegram ("disney.csv", 13 songs): gemma ran `inbox`
+  and `playlist disney`; the import finished in ~4 minutes, 13 of 13 added,
+  report delivered to the chat. Gemma sent a second, redundant reply promising
+  an update; the skill now says the reports reach the user directly.
+- Not yet seen: an import waiting for a busy library outside the tests.
 
 ## Reproduce
 

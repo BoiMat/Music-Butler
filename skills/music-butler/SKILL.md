@@ -205,9 +205,10 @@ playlists) and either sends you the file or saves it as
    playlist that is already saved, its `<name>` is the part after `spotify-`.
 2. Run `REPO/scripts/butler.sh playlist <name>`, once per playlist. It starts
    the import in the background and returns at once.
-3. Reply in one or two lines: the import started, and a report with the added
-   and failed songs arrives every 20 songs. Then stop: do not look up or add
-   these songs yourself, and do not run the command again to wait for it.
+3. Send ONE reply of one or two lines: the import started, and the user gets a
+   short report every 20 songs. The reports go to the user directly, not to
+   you: never promise to follow up or send an update yourself. Then your turn
+   is over: do not look up or add these songs, and do not run the command again.
 
 If the user asks how an import is going, run `butler.sh playlist <name>` again:
 while it runs, it prints the last report. Songs listed as "no certain match" or
