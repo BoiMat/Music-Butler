@@ -16,7 +16,8 @@ Usage: scripts/butler.sh <command>
   validate <id>    check requests/approved-<id>.json offline (no download)
   import <id>      import requests/approved-<id>.json into the library
   status           Navidrome health and library contents
-  library          every release with its id, tags, cover/lyrics status (JSON)
+  library [page]   releases with id, tags, cover/lyrics status, 20 per page
+                   (JSON; "pages" says how many; default page 1)
   retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
   remove <id>      move releases in requests/remove-<id>.json to the library trash
   discover         songs to add next: playlist queue, radio candidates, stale
@@ -102,7 +103,9 @@ case "${1:-}" in
         "${compose[@]}" run --rm -T downloader < "$file"
         ;;
     library)
-        "${compose[@]}" run --rm -T downloader --library < /dev/null
+        page="${2:-1}"
+        [[ "$page" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'invalid page: use a number, e.g. 2' >&2; exit 64; }
+        "${compose[@]}" run --rm -T downloader --library "$page" < /dev/null
         ;;
     retag)
         file="$(request_file retag "${2:-}")"

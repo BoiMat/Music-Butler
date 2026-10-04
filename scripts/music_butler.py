@@ -926,6 +926,22 @@ def ingest(request):
             raise
 
 
+# Agents read tool output through size limits (Hermes scales them down for small
+# models), so the library comes in pages that stay small at any library size.
+LIBRARY_PAGE = 20
+
+
+def library_page(page):
+    releases = read_library()
+    pages = max(1, math.ceil(len(releases) / LIBRARY_PAGE))
+    if not 1 <= page <= pages:
+        emit("error", code=64, reason="no_such_page", pages=pages)
+        return 64
+    emit("library", page=page, pages=pages, releases_total=len(releases),
+         releases=releases[(page - 1) * LIBRARY_PAGE:page * LIBRARY_PAGE])
+    return 0
+
+
 RELEASE_DIR = re.compile(r"--([0-9a-f]{32})$")
 AUDIO_SUFFIXES = (".mp3", ".flac")
 
@@ -1805,7 +1821,8 @@ def main():
     mode.add_argument("--validate", action="store_true", help="Validate JSON offline without downloads or filesystem writes")
     mode.add_argument("--lookup", action="store_true",
                       help='Search/inspect sources from {"search": [...], "urls": [...]}; downloads nothing')
-    mode.add_argument("--library", action="store_true", help="Print every release and its tags; reads no stdin")
+    mode.add_argument("--library", nargs="?", const=1, type=int, metavar="PAGE",
+                      help=f"Print one page ({LIBRARY_PAGE} releases) of releases and their tags; reads no stdin")
     mode.add_argument("--retag", action="store_true",
                       help='Fix tags/covers from {"changes": [...]}; audio is not re-downloaded')
     mode.add_argument("--remove", action="store_true",
@@ -1818,9 +1835,8 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, interrupted)
     try:
-        if args.library:
-            emit("library", releases=read_library())
-            return 0
+        if args.library is not None:
+            return library_page(args.library)
         if args.discover:
             return discover()
         limit = MAX_PLAYLIST if args.queue else MAX_REQUEST

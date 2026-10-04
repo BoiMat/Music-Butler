@@ -71,7 +71,7 @@ request is **not** a guarantee that the library is already indexed.
 **Fixing the library later** (no re-download):
 
 ```sh
-./scripts/butler.sh library          # every release: id, tags, cover/lyrics status (JSON)
+./scripts/butler.sh library [page]   # releases, 20 per page: id, tags, cover/lyrics status (JSON)
 ./scripts/butler.sh retag <id>       # requests/retag-<id>.json: {"changes": [{"release", "track"?,
                                      #   "artist"?, "artists"?, "album"?, "title"?, "year"?,
                                      #   "cover_from"? (a YouTube link) | "artwork_url"?}]}

@@ -1030,5 +1030,25 @@ class DownloadFailures(unittest.TestCase):
         self.assertEqual(summary["failed"][0]["detail"], "ERROR: [youtube] s1: Sign in to confirm")
 
 
+class LibraryPages(unittest.TestCase):
+    def page(self, n, releases):
+        with patch.object(b, "read_library", return_value=releases), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = b.library_page(n)
+        return code, json.loads(output.getvalue())
+
+    def test_pages_split_the_library_and_reject_missing_pages(self):
+        releases = [{"id": f"{i:032x}"} for i in range(45)]
+        code, first = self.page(1, releases)
+        self.assertEqual((code, first["page"], first["pages"], first["releases_total"]), (0, 1, 3, 45))
+        self.assertEqual([r["id"] for r in first["releases"]], [r["id"] for r in releases[:20]])
+        self.assertEqual(self.page(3, releases)[1]["releases"], releases[40:])
+        code, error = self.page(4, releases)
+        self.assertEqual((code, error["reason"], error["pages"]), (64, "no_such_page", 3))
+
+    def test_empty_library_has_one_empty_page(self):
+        self.assertEqual(self.page(1, [])[1]["releases"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

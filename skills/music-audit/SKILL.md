@@ -12,10 +12,14 @@ music here; that is the music-butler skill's job.
 ## 1. Read the library
 
 ```
-REPO/scripts/butler.sh library
+REPO/scripts/butler.sh library 1
 ```
 
-The last line is `{"event": "library", "releases": [...]}`. Each release:
+The library comes in pages of 20 releases, sorted by artist. The last line is
+`{"event": "library", "page": 1, "pages": 6, "releases_total": 104, "releases": [...]}`.
+Run `library 2`, `library 3`, ... up to `pages` and read every page before you
+judge duplicates or spellings: the same artist can continue on the next page.
+Each release:
 
 ```json
 {"id": "26849cee7e3214c10970dfd0bb892154", "artist": "Huntrix",
