@@ -1184,5 +1184,83 @@ class RefreshPlaylists(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["reason"], "admin_account_not_configured")
 
 
+def music_result(vid, artist, title, duration, album="LP", year=2020):
+    return {"url": f"https://www.youtube.com/watch?v={vid}", "names": "release", "duration": duration,
+            "source": "youtube_music", "song": {"artist": artist, "title": title, "album": album, "year": year}}
+
+
+class PlaylistImport(unittest.TestCase):
+    def test_match_needs_same_artist_title_and_length(self):
+        entry = {"artist": "Daft Punk", "artists": ["Daft Punk", "Pharrell Williams"], "title": "Get Lucky (feat. Pharrell)",
+                 "duration": 248}
+        right = music_result("AAAAAAAAAAA", "Daft Punk", "Get Lucky", 249)
+        self.assertIs(b.playlist_match(entry, [right]), right)
+        for wrong in [music_result("BBBBBBBBBBB", "Daft Punk", "Get Lucky (Remix)", 412),   # other version
+                      music_result("CCCCCCCCCCC", "Cover Band", "Get Lucky", 248),         # other artist
+                      music_result("DDDDDDDDDDD", "Daft Punk", "Lose Yourself to Dance", 248),
+                      {**right, "names": "guessed"}]:
+            self.assertIsNone(b.playlist_match(entry, [wrong]))
+        # A featured artist credited first on YouTube Music still matches.
+        self.assertTrue(b.playlist_match(entry, [music_result("EEEEEEEEEEE", "Pharrell Williams", "Get Lucky", 247)]))
+        # Without a Spotify length only the exact title is certain.
+        bare = {"artist": "Daft Punk", "title": "Get Lucky"}
+        self.assertTrue(b.playlist_match(bare, [right]))
+        self.assertIsNone(b.playlist_match(bare, [music_result("FFFFFFFFFFF", "Daft Punk", "Get Lucky (Live)", 300)]))
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        (self.root / "music").mkdir()
+        self.env = patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def run_batch(self, csv, outcomes):
+        """outcomes: title -> "added" | (reason, code); every release goes through import_releases."""
+        def fake_search(q, cwd, env):
+            artist, title = q.split(" ", 1)
+            return [] if title.startswith("Unknown") else [music_result(f"{abs(hash(title)) % 10**11:011d}", artist, title, 200)]
+        def fake_import(releases):
+            failed, outs = [], []
+            for rel in releases:
+                result = outcomes.get(rel["tracks"][0]["title"], "added")
+                if result == "added":
+                    outs.append("added")
+                else:
+                    failed.append({**b.describe(rel), "reason": result[0], "code": result[1]})
+                    outs.append("failed")
+            return [], failed, [], next((f["code"] for f in failed), 0), outs
+        with patch.object(b, "youtube_music", side_effect=fake_search), \
+                patch.object(b, "import_releases", side_effect=fake_import) as imported, \
+                patch.object(b.socket, "getaddrinfo", return_value=[(2, 1, 6, "", ("142.250.1.1", 443))]), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            code = b.import_playlist("mix", csv)
+        return code, json.loads(output.getvalue()), imported
+
+    def test_batches_of_twenty_report_and_never_retry_given_up_songs(self):
+        rows = [f"Song {n},Artist,200000" for n in range(1, 24)] + ["Unknown song,Artist,200000"]
+        csv = ("Track Name,Artist Name(s),Duration (ms)\n" + "\n".join(rows) + "\n").encode()
+        code, first, imported = self.run_batch(csv, {"Song 2": ("media_tool_failed", 69)})
+        self.assertEqual(code, 0)
+        self.assertEqual(len(imported.call_args.args[0]), 20)
+        self.assertEqual((first["songs"], first["remaining"], len(first["added"])), (24, 4, 19))
+        self.assertEqual(first["failed"], [{"song": "Artist - Song 2", "reason": "media_tool_failed"}])
+        self.assertTrue(all(r["origin"] == "playlist" for r in imported.call_args.args[0]))
+        # The next call goes on with the rest; the failed song is not tried again.
+        _, second, imported = self.run_batch(csv, {})
+        self.assertEqual([r["tracks"][0]["title"] for r in imported.call_args.args[0]],
+                         ["Song 21", "Song 22", "Song 23"])
+        self.assertEqual((second["not_matched"], second["remaining"]), (["Artist - Unknown song"], 0))
+        state = json.loads((self.root / "discovery" / "imports" / "mix.json").read_text())
+        self.assertEqual(set(state["given_up"].values()), {"media_tool_failed", "no_certain_match"})
+
+    def test_busy_library_stops_without_giving_up(self):
+        csv = b"Track Name,Artist Name(s)\nSong A,Artist\nSong B,Artist\n"
+        code, summary, _ = self.run_batch(csv, {"Song A": ("busy_retry_later", 75)})
+        self.assertEqual((code, summary["stopped"], summary["remaining"], summary["failed"]), (75, "busy_retry_later", 1, []))
+        state = json.loads((self.root / "discovery" / "imports" / "mix.json").read_text())
+        self.assertEqual(state["given_up"], {})  # both songs are tried again next time
+
+
 if __name__ == "__main__":
     unittest.main()

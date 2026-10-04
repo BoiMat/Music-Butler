@@ -7,6 +7,7 @@ import difflib
 import email.utils
 import fcntl
 import hashlib
+import io
 import ipaddress
 import json
 import math
@@ -498,54 +499,63 @@ def video_summary(entry, given_url=None):
     return summary
 
 
+def guarded(fn, failure):
+    try:
+        return fn()
+    except (Failure, OSError, ValueError) as exc:
+        if isinstance(exc, Failure) and exc.code in (130, 143):
+            raise
+        return {"error": failure}
+
+
+def details(link, cwd, env):
+    entries = capture([*ytdlp_base(), "--no-playlist", "--dump-json", "--ignore-no-formats-error", "--", link], cwd, env)
+    return entries[0] if entries else {}
+
+
+def enrich(r, cwd, env):
+    # Full metadata (artists, album, year, duration) needs one request per result.
+    extra = guarded(lambda: video_summary(details(r["url"], cwd, env)) or {}, "details_failed")
+    if extra.get("names") == "release":
+        r.update({k: extra[k] for k in ("title", "channel", "duration", "names", "song") if extra.get(k)})
+    elif r.get("duration") is None and extra.get("duration"):
+        r["duration"] = extra["duration"]
+    return r
+
+
+def youtube_music(q, cwd, env):
+    """YouTube Music "songs" for a search: studio audio with the release's own artist,
+    title, album and year. Only results with release names are returned."""
+    music = guarded(lambda: capture(
+        [*ytdlp_base(), "--flat-playlist", "--dump-json", "--playlist-items", f"1:{MUSIC_RESULTS}", "--",
+         "https://music.youtube.com/search?q=" + urllib.parse.quote(q) + "#songs"], cwd, env), "search_failed")
+    music = [enrich(r, cwd, env) for r in map(video_summary, music if isinstance(music, list) else []) if r]
+    music = [r for r in music if r["names"] == "release"]
+    for r in music:
+        r["source"] = "youtube_music"
+    return music
+
+
 def lookup(query):
     """Search YouTube and/or read metadata for URLs. Nothing is downloaded or written."""
     with tempfile.TemporaryDirectory(prefix="lookup-") as tmp:
         env = {"PATH": os.environ["PATH"], "HOME": tmp, "XDG_CONFIG_HOME": tmp,
                "XDG_CACHE_HOME": tmp, "TMPDIR": tmp, "LANG": "C.UTF-8"}
-        full = [*ytdlp_base(), "--no-playlist", "--dump-json", "--ignore-no-formats-error"]
-
-        def details(link):
-            entries = capture([*full, "--", link], tmp, env)
-            return entries[0] if entries else {}
-
-        def guarded(fn, failure):
-            try:
-                return fn()
-            except (Failure, OSError, ValueError) as exc:
-                if isinstance(exc, Failure) and exc.code in (130, 143):
-                    raise
-                return {"error": failure}
-
-        def enrich(r):
-            # Full metadata (artists, album, year, duration) needs one request per result.
-            extra = guarded(lambda: video_summary(details(r["url"])) or {}, "details_failed")
-            if extra.get("names") == "release":
-                r.update({k: extra[k] for k in ("title", "channel", "duration", "names", "song") if extra.get(k)})
-            elif r.get("duration") is None and extra.get("duration"):
-                r["duration"] = extra["duration"]
-            return r
 
         def search(q):
-            # YouTube Music "songs" first: studio audio with the release's artist/title/album.
-            music = guarded(lambda: capture(
-                [*ytdlp_base(), "--flat-playlist", "--dump-json", "--playlist-items", f"1:{MUSIC_RESULTS}", "--",
-                 "https://music.youtube.com/search?q=" + urllib.parse.quote(q) + "#songs"], tmp, env), "search_failed")
-            music = [enrich(r) for r in map(video_summary, music if isinstance(music, list) else []) if r]
-            music = [r for r in music if r["names"] == "release"]
+            # YouTube Music "songs" first, then YouTube videos.
+            music = youtube_music(q, tmp, env)
             videos = capture([*ytdlp_base(), "--flat-playlist", "--dump-json", "--",
                               f"ytsearch{SEARCH_RESULTS}:{q}"], tmp, env)
             seen = {r["url"] for r in music}
             videos = [r for r in map(video_summary, videos) if r and r["url"] not in seen]
             topic = [r for r in videos if (r["channel"] or "").endswith(" - Topic")][:ENRICH_PER_SEARCH]
             for r in topic:
-                enrich(r)
-            for r in music:
-                r["source"] = "youtube_music"
+                enrich(r, tmp, env)
             return {"query": q, "results": music + videos}
 
         def one_url(link):
-            return video_summary(details(link), given_url=link) or {"url": link, "error": "not_importable"}
+            return video_summary(details(link, tmp, env), given_url=link) or {"url": link, "error": "not_importable"}
 
         searches = [{"query": q, **guarded(lambda: search(q), "search_failed")} for q in query["search"]]
         urls = [{"url": u, **guarded(lambda: one_url(u), "lookup_failed")} for u in query["urls"]]
@@ -1592,6 +1602,114 @@ def queue_playlist(raw):
     return 0
 
 
+PLAYLIST_BATCH = 20  # songs per `butler.sh playlist` call: minutes, not hours, per call
+DURATION_SLACK = 3  # seconds between Spotify's and YouTube Music's length of one recording
+
+
+def playlist_match(entry, results):
+    """The YouTube Music release of a playlist song, or None when not certain: the same
+    main artist and title, and a length within DURATION_SLACK of Spotify's. Without a
+    Spotify length the title must match exactly (a remix or live version differs)."""
+    artists = {norm(main_artist(a)) for a in entry.get("artists") or [entry["artist"]]}
+    for r in results:
+        song = r.get("song") or {}
+        if r.get("names") != "release" or norm(main_artist(song.get("artist"))) not in artists:
+            continue
+        if entry.get("duration"):
+            if norm(base_title(song.get("title"))) != norm(base_title(entry["title"])):
+                continue
+            if not r.get("duration") or abs(r["duration"] - entry["duration"]) > DURATION_SLACK:
+                continue
+        elif norm(song.get("title")) != norm(entry["title"]):
+            continue
+        return r
+    return None
+
+
+def import_playlist(playlist, raw):
+    """Import the next PLAYLIST_BATCH songs of a playlist CSV that are not in the library.
+
+    Python matches every song (playlist_match) instead of an agent choosing among
+    lookup results, so a whole playlist needs no judgment calls; songs without a
+    certain match are reported and not retried. Call again until `remaining` is 0.
+    """
+    entries = parse_playlist(raw)
+    root = library_root()
+    state_path = safe_dir(discovery_path(root, "imports")) / (playlist + ".json")
+    state = read_state(root, f"imports/{playlist}.json", {})
+    given_up = state.get("given_up") if isinstance(state.get("given_up"), dict) else {}
+    # Imported songs are recorded too: the library knows them by YouTube Music's names,
+    # which can differ from Spotify's, so the library alone cannot say they are done.
+    finished = set(state.get("done")) if isinstance(state.get("done"), list) else set()
+    idx = library_index(read_library())
+    gone, _ = blocked(read_state(root, "history.json", {}))
+    seen, todo, in_library = set(), [], 0
+    for entry in entries:
+        key = song_key(entry["artist"], entry["title"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if key in idx["keys"] or key in finished:
+            in_library += 1
+        elif key not in gone and key not in given_up:
+            todo.append((key, entry))
+    batch = todo[:PLAYLIST_BATCH]
+    not_matched, matched = [], []
+    with tempfile.TemporaryDirectory(prefix="playlist-") as tmp:
+        env = {"PATH": os.environ["PATH"], "HOME": tmp, "XDG_CONFIG_HOME": tmp,
+               "XDG_CACHE_HOME": tmp, "TMPDIR": tmp, "LANG": "C.UTF-8"}
+        for key, entry in batch:
+            found = playlist_match(entry, youtube_music(entry["search"], tmp, env))
+            if not found:
+                not_matched.append(f"{entry['artist']} - {entry['title']}")
+                given_up[key] = "no_certain_match"
+                continue
+            song = {k: found["song"][k] for k in ("artist", "title", "album", "artists", "year") if found["song"].get(k)}
+            song.setdefault("year", entry.get("year"))
+            matched.append((key, {**{k: v for k, v in song.items() if v}, "url": found["url"], "origin": "playlist"}))
+    failed, releases, keys = [], [], {}
+    for key, song in matched:
+        try:
+            release = parse({"songs": [song]}, resolve=True)[0]
+        except Failure as exc:
+            failed.append({"song": f"{song['artist']} - {song['title']}", "reason": str(exc)})
+            given_up[key] = str(exc)
+            continue
+        releases.append(release)
+        keys[id(release)] = key
+    checked = list(releases)
+    skipped = check_library(releases)  # e.g. the same song under another playlist title
+    finished |= {keys[id(r)] for r in checked if not any(r is kept for kept in releases)}
+    with contextlib.redirect_stdout(io.StringIO()):  # one summary line per batch, not one per step
+        _, failures, not_attempted, code, outcomes = import_releases(releases) if releases else ([], [], [], 0, [])
+    failures = iter(failures)  # in release order, one per "failed" outcome
+    done, retry, stopped = [], 0, None
+    for release, outcome in zip(releases, outcomes):
+        name = f"{release['artist']} - {release['tracks'][0]['title']}"
+        if outcome == "added":
+            done.append(name)
+            finished.add(keys[id(release)])
+        elif outcome == "failed":
+            failure = next(failures)
+            if failure["code"] not in CONTINUE_CODES:
+                # Busy library, full disk, interrupt: not the song's fault; try it again.
+                stopped, retry = failure["reason"], retry + 1
+                continue
+            failed.append({"song": name, "reason": failure["reason"],
+                           **({"detail": failure["detail"]} if failure.get("detail") else {})})
+            given_up[keys[id(release)]] = failure["reason"]
+        else:
+            retry += 1
+    write_json(state_path, {"given_up": given_up, "done": sorted(finished)})
+    emit("summary", ok=not failed and not not_matched and not stopped, playlist=playlist,
+         **({"stopped": stopped} if stopped else {}),
+         added=done, failed=failed, not_matched=not_matched,
+         already_in_library=[f"{s['artist']} - {s['title']}" for s in skipped],
+         remaining=len(todo) - len(batch) + retry, songs=len(seen),
+         in_library=in_library + len(done) + len(skipped))
+    return code if stopped else 0
+
+
 def interleave(old, new):
     """Spread a new playlist evenly through the queue, so every import day mixes
     all playlists instead of working through them one after another."""
@@ -1887,8 +2005,17 @@ def import_all(releases, skipped=()):
     Exit 0 only if every release was added. Invalid/unavailable sources (65/69) skip
     to the next release; storage, lock, interrupt or internal errors stop the batch.
     """
+    added, failed, not_attempted, first_code, _ = import_releases(releases)
+    emit("summary", ok=not failed and not not_attempted and not first_code,
+         added=added, failed=failed, not_attempted=not_attempted, **({"skipped": list(skipped)} if skipped else {}))
+    return first_code
+
+
+def import_releases(releases):
+    """import_all's work: (added, failed, not_attempted, first exit code, one outcome per
+    release: "added", "failed" or "not_attempted")."""
     added, failed, first_code = [], [], 0
-    not_attempted = []
+    not_attempted, outcomes = [], []
     for i, release in enumerate(releases):
         detail = None
         try:
@@ -1896,6 +2023,7 @@ def import_all(releases, skipped=()):
             added.append({**describe(release), "scan": result["scan"],
                           "songs": [{"title": t["title"], "lyrics": t["lyrics"], "artwork": t["artwork"]}
                                     for t in result["tracks"]]})
+            outcomes.append("added")
             continue
         except Failure as exc:
             code, reason, published = exc.code, str(exc), getattr(exc, "butler_published", None)
@@ -1909,15 +2037,16 @@ def import_all(releases, skipped=()):
         if published:
             # The audio IS in the library; only the receipt/scan step failed. Never re-import it.
             added.append({**describe(release), "warning": "published_check_before_retry"})
+            outcomes.append("added")
         else:
             failed.append({**describe(release), "reason": reason, "code": code,
                            **({"detail": detail} if detail else {})})
+            outcomes.append("failed")
         if code not in CONTINUE_CODES:
             not_attempted = [describe(r) for r in releases[i + 1:]]
+            outcomes += ["not_attempted"] * len(not_attempted)
             break
-    emit("summary", ok=not failed and not not_attempted and not first_code,
-         added=added, failed=failed, not_attempted=not_attempted, **({"skipped": list(skipped)} if skipped else {}))
-    return first_code
+    return added, failed, not_attempted, first_code, outcomes
 
 
 def main():
@@ -1936,6 +2065,8 @@ def main():
                       help='Fix tags/covers from {"changes": [...]}; audio is not re-downloaded')
     mode.add_argument("--remove", action="store_true",
                       help='Move {"releases": [...]} to the library trash; nothing is deleted')
+    mode.add_argument("--playlist", metavar="ID",
+                      help="Import the next songs of a playlist CSV from stdin (Exportify); ID names its progress")
     mode.add_argument("--playlists", action="store_true",
                       help="Wait for the scan, then refresh the smart playlists as their owner; reads no stdin")
     mode.add_argument("--lyrics", action="store_true",
@@ -1956,12 +2087,16 @@ def main():
             return missing_lyrics()
         if args.playlists:
             return refresh_playlists()
-        limit = MAX_PLAYLIST if args.queue else MAX_REQUEST
+        limit = MAX_PLAYLIST if args.queue or args.playlist is not None else MAX_REQUEST
         raw = sys.stdin.buffer.read(limit + 1)
         if len(raw) > limit:
             raise Failure("request_too_large")
         if args.queue:
             return queue_playlist(raw)
+        if args.playlist is not None:
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", args.playlist):
+                raise Failure("invalid_playlist_id", 64)
+            return import_playlist(args.playlist, raw)
         if args.seeds:
             return merge_seeds(validate_seeds(json.loads(raw)))
         if args.lookup:

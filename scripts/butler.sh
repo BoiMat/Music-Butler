@@ -26,6 +26,9 @@ Usage: scripts/butler.sh <command>
                    rated 1 star to remove (JSON; downloads nothing)
   seeds <id>       merge taste seeds from requests/seeds-<id>.json
   queue <id>       queue the songs of requests/spotify-<id>.csv (an Exportify export)
+  playlist <id>    import all of requests/spotify-<id>.csv now, in the background,
+                   20 songs at a time with a report after each (again: progress)
+  inbox            copy new playlist CSVs from PLAYLIST_INBOX into requests/
   drives           list mounted external drives (macOS /Volumes, Linux /media)
   backup [drive]   encrypted backup to <drive mount>/music-butler-restic,
                    or to BACKUP_REPOSITORY from .env when no drive is given
@@ -133,6 +136,14 @@ case "${1:-}" in
     queue)
         file="$(request_file spotify "${2:-}" csv)"
         "${compose[@]}" run --rm -T downloader --queue < "$file"
+        ;;
+    playlist)
+        file="$(request_file spotify "${2:-}" csv)"
+        id="${file#requests/spotify-}"
+        scripts/playlist.sh start "${id%.csv}"
+        ;;
+    inbox)
+        scripts/playlist.sh inbox
         ;;
     status)
         "${compose[@]}" ps navidrome

@@ -1,6 +1,6 @@
 ---
 name: music-discover
-description: Grow the user's self-hosted Navidrome music library (Music Butler Stack) on a schedule. Import songs queued from their playlists, discover new songs they may like from their taste seeds and listening, and remove discoveries they never played. Use for a scheduled or requested "bootstrap" or "weekly discovery" run, not for songs the user names.
+description: Grow the user's self-hosted Navidrome music library (Music Butler Stack) on a schedule. Import songs queued from their playlists, discover new songs they may like from their taste seeds and listening, and remove songs they rated 1 star. Use for a scheduled or requested "bootstrap" or "weekly discovery" run, not for songs the user names.
 ---
 
 # Music Discover

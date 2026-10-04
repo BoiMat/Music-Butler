@@ -102,13 +102,29 @@ an agent then adds songs from your playlists and songs you have not heard yet.
                                      #   "songs": [{"artist", "title"}], "notes": "..." (added to
                                      #   earlier notes; "clear_notes": true resets them),
                                      #   "block_artists": [...], "remove_artists": [...]}
-./scripts/butler.sh queue <id>       # requests/spotify-<id>.csv (an https://exportify.app export)
+./scripts/butler.sh playlist <id>    # import requests/spotify-<id>.csv (an https://exportify.app export) now
+./scripts/butler.sh inbox            # copy new CSVs from PLAYLIST_INBOX into requests/
+./scripts/butler.sh queue <id>       # or queue it for the daily bootstrap job, 25 songs a day
 ./scripts/butler.sh discover         # what to add next (JSON); downloads nothing
 ```
 
-- **Playlists**: `queue` reads a Spotify playlist exported as CSV with Exportify
-  (any CSV with track and artist columns works) and queues the songs that are not
-  in the library yet.
+- **Playlists**: `playlist` imports a Spotify playlist exported as CSV with
+  Exportify (any CSV with track and artist columns works) in the background and
+  returns at once. Python, not the agent, matches each song: a YouTube Music
+  release by the same main artist (or one of the credited artists) with the same
+  title, at most 3 s longer or shorter than on Spotify (without a Spotify length,
+  the exact title). Songs without such a match are reported as "no certain
+  match" and not guessed; add them by name if you want them. Every call of the
+  importer handles 20 songs; after each, a report (added, failed with the reason,
+  not matched, how many are left) goes to `requests/spotify-<id>.log` and to the
+  `PLAYLIST_NOTIFY` command (e.g. `hermes send`). Progress is kept in
+  `<library>/discovery/imports/<id>.json`, so a stopped import continues where it
+  stopped and failed songs are not retried; a busy library (another import) is
+  waited for. `playlist <id>` again while it runs prints the last report.
+  `inbox` picks up CSVs the user sent to the agent: Hermes saves Telegram files
+  in its profile's `cache/documents`, which `PLAYLIST_INBOX` points to.
+  `queue` is the slow alternative: the daily bootstrap job adds 25 queued songs
+  a day.
 - **Discovery**: `discover` reads the YouTube Music radio of songs you love and
   ranks the songs found there by how many (and how loved) seeds lead to them. At
   most 2 songs per artist; songs already in the library, removed before or

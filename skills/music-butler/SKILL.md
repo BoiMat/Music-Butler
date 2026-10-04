@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste or queue a Spotify playlist for the discovery job, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported, or asks for a music backup.
+description: Add one or more songs or albums to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole Spotify playlist (CSV), or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported, or asks for a music backup.
 ---
 
 # Music Butler
@@ -66,7 +66,7 @@ The user may spell the artist differently from the release (`Huntrix` for
 A remix is a different song: pick it only if the user asked for the remix.
 
 Use only a `url` from the results or from the user. Never invent or edit a URL.
-Never add a playlist or channel. If the user gives an archive.org or Wikimedia
+Never add a YouTube playlist or channel link. If the user gives an archive.org or Wikimedia
 link, use that link.
 
 Ask the user before continuing only if:
@@ -195,19 +195,31 @@ All keys are optional. Use only what the user said:
 The last line of the output shows all current seeds; tell the user briefly.
 Do not add these songs now; the discovery job picks them up.
 
-**"Import my Spotify playlist"**: you cannot read Spotify. Tell the user to
-export the playlist as CSV at https://exportify.app (works for their own and
-followed playlists) and save it as `REPO/requests/spotify-<name>.csv`, where
-`<name>` is lowercase letters, digits and dashes. Then run
-`REPO/scripts/butler.sh queue <name>`. The output reports `queued`,
-`in_library`, `duplicate` and `queue` (songs waiting). The queued songs are
-imported by the daily bootstrap job, 25 a day. Do not add them yourself.
+**"Import my Spotify playlist"**: you cannot read Spotify. The user exports the
+playlist as CSV at https://exportify.app (works for their own and followed
+playlists) and either sends you the file or saves it as
+`REPO/requests/spotify-<name>.csv`.
+
+1. If the user sent a CSV file, run `REPO/scripts/butler.sh inbox`. It prints
+   `New playlist: <name> (<n> songs)` for each new file. If the user names a
+   playlist that is already saved, its `<name>` is the part after `spotify-`.
+2. Run `REPO/scripts/butler.sh playlist <name>`, once per playlist. It starts
+   the import in the background and returns at once.
+3. Reply in one or two lines: the import started, and a report with the added
+   and failed songs arrives every 20 songs. Then stop: do not look up or add
+   these songs yourself, and do not run the command again to wait for it.
+
+If the user asks how an import is going, run `butler.sh playlist <name>` again:
+while it runs, it prints the last report. Songs listed as "no certain match" or
+failed can be added one by one the normal way when the user asks for them.
 
 ## Other commands
 
 ```
 REPO/scripts/butler.sh lookup <id>     # search / read links (Step 1), downloads nothing
 REPO/scripts/butler.sh status          # is Navidrome up + releases in the library
+REPO/scripts/butler.sh inbox           # pick up playlist CSV files the user sent
+REPO/scripts/butler.sh playlist <name> # import a whole playlist in the background
 REPO/scripts/butler.sh discover        # current taste seeds, playlist queue and discovery candidates
 REPO/scripts/butler.sh drives          # USB drives currently plugged in
 REPO/scripts/butler.sh backup <drive>  # encrypted backup to that drive

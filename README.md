@@ -29,9 +29,12 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   spellings are caught before anything downloads.
 - **Clean files**: ID3v2.4 / FLAC tags (including multi-artist), square cover
   art, time-synced `.lrc` lyrics. Each album appears in the library all at once.
-- **Taste bootstrap**: import Spotify playlists (exported with
-  [Exportify](https://exportify.app)), plus artists and a few words about
-  your taste ("Italian pop, no trap").
+- **Whole playlists at once**: send a Spotify playlist (exported with
+  [Exportify](https://exportify.app)) to the bot. It imports every song in the
+  background and reports every 20 songs. Each song is matched to YouTube Music
+  by artist, title and length, and anything uncertain is listed instead of guessed.
+- **Taste**: a few artists and a few words ("Italian pop, no trap") steer
+  discovery until your own likes and ratings take over.
 - **Weekly discovery**: new songs from the YouTube Music radios of songs you
   liked or rated highly, at least 5 by artists new to you, in a
   *Discover Weekly* playlist. Giving a song 1★ is the only way it leaves the
@@ -94,8 +97,17 @@ Codex, Copilot and Hermes. You can also
 # Listening account, so discovery learns from your stars, ratings and plays:
 #   .env: NAVIDROME_LISTENER_USER=<your non-admin user>
 #   secrets/navidrome_listener_password (chmod 600)
-./scripts/butler.sh queue liked       # requests/spotify-liked.csv, an Exportify export
+./scripts/butler.sh playlist liked    # import requests/spotify-liked.csv (an Exportify export) now
 ./scripts/butler.sh seeds start       # requests/seeds-start.json: {"artists": [...], "notes": "..."}
+```
+
+A playlist import runs in the background, 20 songs at a time, and reports after
+each batch to `requests/spotify-<id>.log`. To get the reports in your chat, and
+to send playlists to the bot as files, set in `.env`:
+
+```sh
+PLAYLIST_NOTIFY=hermes -p music-butler send --to telegram --quiet   # any command reading stdin
+PLAYLIST_INBOX=/home/you/.hermes/profiles/music-butler/cache/documents  # where Hermes saves files
 ```
 
 Then schedule the runs below. Details of the
