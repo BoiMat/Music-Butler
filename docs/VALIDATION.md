@@ -287,6 +287,14 @@ live stack.
   and `playlist disney`; the import finished in ~4 minutes, 13 of 13 added,
   report delivered to the chat. Gemma sent a second, redundant reply promising
   an update; the skill now says the reports reach the user directly.
+- The three remaining saved playlists, one after another (liked 58,
+  hit-estive-italiane 119, best-hits-2026 143): about 40 minutes; library 372
+  songs. 2 downloads failed with YouTube's "HTTP Error 403: Forbidden" (now
+  visible in the report thanks to the error detail), 10 songs had no certain
+  match (e.g. Dua Lipa - Don't Start Now, Jennifer Lopez - On The Floor).
+- The Tempo playlist sync ran for best-hits-2026: "Best Hits 2026" with 136
+  songs in Spotify order, owned by the listening account (then deleted: the
+  owner keeps these songs as one shuffled library).
 - Not yet seen: an import waiting for a busy library outside the tests.
 
 ## Reproduce
