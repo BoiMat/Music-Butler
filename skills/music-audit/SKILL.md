@@ -51,7 +51,11 @@ Check every release for:
    fixes above, durations within a few seconds).
 6. **Missing cover** (`"cover": false`) or a cover that is a video frame
    (the source was a music or lyric video, not an "Artist - Topic" upload).
-7. **Missing year** where the release year is known.
+7. **Missing year** where the release year is known. A YouTube Music result
+   with `"names": "release"` for the same artist and title gives the year even
+   when its duration differs from the library copy (a remaster, an album or a
+   "Original Version" upload): duration matters for audio and lyrics, not for
+   the year. If release results disagree, use the earliest year.
 8. **Songwriters listed as artists**: some labels put the writers in the
    artist credits, so a track's `artists` can hold people who do not perform
    on it, e.g. `["Bad Bunny", "Benito A. Martinez Ocasio", "Scott Dittrich", ...]`
@@ -73,6 +77,18 @@ release's own `song` names (`artist`, `title`, `album`, `year`, `artists`).
 Trust those over your memory.
 
 ## 3. Fix what is certain
+
+**Lyrics** first: songs often get synced lyrics on LRCLIB after they were
+imported. Run, once per audit:
+
+```
+REPO/scripts/butler.sh lyrics
+```
+
+It retries every song without lyrics (nothing else changes) and ends with a
+summary: `found` (now have synced lyrics), `missing` (with the reason) and
+`not_attempted` (LRCLIB rate limit: they wait for next week). Report how many
+were found. Never try to fix lyrics another way.
 
 Fix a problem yourself only when a lookup result or the library itself makes
 the right value certain. Everything else goes in the report.

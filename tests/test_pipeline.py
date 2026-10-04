@@ -234,6 +234,23 @@ class NetworkMocks(unittest.TestCase):
                 self.assertEqual(fetch.call_count, 1)
                 self.assertGreater(float(lyrics.cooldown.read_text()), time.time())
 
+    def test_lyrics_get_with_only_plain_lyrics_falls_back_to_strict_search(self):
+        req = request()
+        track = req["tracks"][0]
+        found = [{"artistName": "Elsewhere", "trackName": track["title"], "duration": 200,
+                  "syncedLyrics": "[00:01.00]Wrong artist"},
+                 {"artistName": req["artist"], "trackName": track["title"], "duration": 201,
+                  "syncedLyrics": "[00:01.00]Right"}]
+        def fake_fetch(address, **kwargs):
+            if "/api/get?" in address:
+                return b'{"plainLyrics": "Plain only", "instrumental": false}'
+            return json.dumps(found).encode()
+        with patch.dict(os.environ, {"LRCLIB_USER_AGENT": "offline-test"}), patch.object(b.time, "sleep"), \
+                patch.object(b, "fetch", side_effect=fake_fetch):
+            dest = self.root / "plain.mp3"
+            self.assertEqual(b.Lyrics(self.root).get(req, track, 200, dest), "synced")
+            self.assertEqual(dest.with_suffix(".lrc").read_text(), "[00:01.00]Right")
+
     def test_validate_lookup(self):
         self.assertEqual(b.validate_lookup({"search": "Daft Punk Get Lucky"}),
                          {"search": ["Daft Punk Get Lucky"], "urls": []})
@@ -1048,6 +1065,90 @@ class LibraryPages(unittest.TestCase):
 
     def test_empty_library_has_one_empty_page(self):
         self.assertEqual(self.page(1, [])[1]["releases"], [])
+
+
+class MissingLyrics(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.env = patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root), "LRCLIB_USER_AGENT": "offline-test"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def release(self, name, rid, files, tracks):
+        folder = self.root / "music" / f"{name}--{rid}"
+        folder.mkdir(parents=True)
+        for f in files:
+            (folder / f).write_bytes(b"")
+        (folder / "provenance.json").write_text(json.dumps({"request": {"tracks": []}, "tracks": tracks}))
+        return folder
+
+    def test_retries_tracks_without_lyrics_and_records_the_result(self):
+        a = self.release("A--One", "a" * 32, ["001-x.mp3"], [{"file": "001-x.mp3", "lyrics": "lookup_failed"}])
+        c = self.release("C--Three", "c" * 32, ["001-z.mp3"], [{"file": "001-z.mp3", "lyrics": "unavailable"}])
+        done = self.release("B--Two", "b" * 32, ["001-y.mp3", "001-y.lrc"], [{"file": "001-y.mp3", "lyrics": "synced"}])
+        tags = {"001-x.mp3": "Song A", "001-z.mp3": "Song C"}
+        def fake_get(lyrics, request, track, duration, dest):
+            self.assertEqual((request["artist"], duration), ("Main", 200))
+            if track["title"] == "Song A":
+                dest.with_suffix(".lrc").write_text("[00:01.00] la")
+                return "synced"
+            return "unavailable"
+        with patch.object(b, "read_tags", side_effect=lambda p: {"title": tags[p.name], "albumartist": "Main",
+                                                                 "artist": "Main & Guest", "album": None, "duration": 200}), \
+                patch.object(b.Lyrics, "get", autospec=True, side_effect=fake_get) as get, \
+                patch.object(b, "scan", return_value="requested"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.missing_lyrics(), 0)
+        self.assertEqual(get.call_count, 2)  # the release that has lyrics is skipped
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary["found"], [{"release": "a" * 32, "artist": "Main", "title": "Song A"}])
+        self.assertEqual([m["lyrics"] for m in summary["missing"]], ["unavailable"])
+        self.assertEqual(summary["scan"], "requested")
+        self.assertEqual(json.loads((a / "provenance.json").read_text())["tracks"][0]["lyrics"], "synced")
+        self.assertEqual(json.loads((c / "provenance.json").read_text())["tracks"][0]["lyrics"], "unavailable")
+        self.assertTrue((done / "001-y.lrc").exists())
+
+    def test_rate_limit_stops_the_run(self):
+        for n in "ab":
+            self.release(f"{n}--x", n * 32, ["001-s.mp3"], [])
+        with patch.object(b, "read_tags", return_value={"title": "S", "artist": "A", "duration": 100}), \
+                patch.object(b.Lyrics, "get", return_value="rate_limited") as get, \
+                patch.object(b, "scan") as scan, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.missing_lyrics(), 69)
+        self.assertEqual(get.call_count, 1)
+        scan.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["not_attempted"], [{"release": "b" * 32, "file": "001-s.mp3"}])
+
+    def test_disabled_without_user_agent(self):
+        with patch.dict(os.environ, {"LRCLIB_USER_AGENT": ""}), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.missing_lyrics(), 64)
+        self.assertEqual(json.loads(output.getvalue())["reason"], "lyrics_disabled")
+
+    def test_lrclib_call_retries_dropped_connections_and_503_but_not_answers(self):
+        lyrics = b.Lyrics(self.root)
+        replies = [urllib.error.URLError("reset"), b'{"ok": 1}']
+        def fake_fetch(*args, **kwargs):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        with patch.object(b, "fetch", side_effect=fake_fetch), patch.object(b.time, "sleep"):
+            self.assertEqual(lyrics.call("get", {}), {"ok": 1})
+        busy = urllib.error.HTTPError("u", 503, "busy", {}, None)
+        replies.extend([busy, busy, b'{"ok": 2}'])
+        with patch.object(b, "fetch", side_effect=fake_fetch), patch.object(b.time, "sleep") as sleep:
+            self.assertEqual(lyrics.call("get", {}), {"ok": 2})
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.5, *b.LYRICS_RETRY_PAUSES])
+        with patch.object(b, "fetch", side_effect=busy) as fetch, patch.object(b.time, "sleep"), \
+                self.assertRaises(urllib.error.HTTPError):
+            lyrics.call("get", {})
+        self.assertEqual(fetch.call_count, 3)
+        not_found = urllib.error.HTTPError("u", 404, "nf", {}, None)
+        with patch.object(b, "fetch", side_effect=not_found) as fetch, patch.object(b.time, "sleep"), \
+                self.assertRaises(urllib.error.HTTPError):
+            lyrics.call("get", {})
+        self.assertEqual(fetch.call_count, 1)
 
 
 if __name__ == "__main__":

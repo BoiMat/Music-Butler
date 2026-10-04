@@ -37,7 +37,7 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   *Discover Weekly* smart playlist. 1★ removes a song. Discoveries you never
   play are pruned after four weeks.
 - **Weekly audit**: a stronger model checks tags and covers and fixes what it is
-  sure about.
+  sure about, and lyrics are retried for songs that had none (LRCLIB grows).
 - **Safe defaults**: hardened containers (read-only, no capabilities, non-root),
   Navidrome on loopback only, a download host allowlist, every import logged
   with hashes, and encrypted [restic](https://restic.net) backups.
@@ -110,7 +110,7 @@ prints its report:
 | --- | --- | --- |
 | `bootstrap` | daily | adds up to 25 songs (playlist queue first) until the library holds `BOOTSTRAP_TARGET` songs and the queue is empty, then reports once and stays silent |
 | `weekly` | weekly | removes stale discoveries, adds 15 new songs |
-| `audit` | weekly | fixes certain tag, cover and duplicate problems, reports the rest |
+| `audit` | weekly | retries missing lyrics, fixes certain tag, cover and duplicate problems, reports the rest |
 
 Choose the agent in `.env`:
 

@@ -19,6 +19,7 @@ Usage: scripts/butler.sh <command>
   library [page]   releases with id, tags, cover/lyrics status, 20 per page
                    (JSON; "pages" says how many; default page 1)
   retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
+  lyrics           retry synced lyrics (LRCLIB) for every song without them
   remove <id>      move releases in requests/remove-<id>.json to the library trash
   discover         songs to add next: playlist queue, radio candidates, stale
                    discoveries (JSON; downloads nothing)
@@ -106,6 +107,9 @@ case "${1:-}" in
         page="${2:-1}"
         [[ "$page" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'invalid page: use a number, e.g. 2' >&2; exit 64; }
         "${compose[@]}" run --rm -T downloader --library "$page" < /dev/null
+        ;;
+    lyrics)
+        "${compose[@]}" run --rm -T downloader --lyrics < /dev/null
         ;;
     retag)
         file="$(request_file retag "${2:-}")"

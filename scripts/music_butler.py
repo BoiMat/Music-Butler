@@ -687,6 +687,9 @@ def source_thumbnail(work, env):
         return None
 
 
+LYRICS_RETRY_PAUSES = (5, 15)  # seconds before the 2nd and 3rd attempt
+
+
 class Lyrics:
     def __init__(self, root):
         self.cooldown = root / "lyrics-retry-after"
@@ -710,9 +713,18 @@ class Lyrics:
                 body = self.search(request["artist"], track["title"], duration)
                 if body is None:
                     return "unavailable"
+            else:
+                if not self.has_synced(body):
+                    # The release's own entry may hold only plain lyrics (or a wrong
+                    # "instrumental" flag) while another upload of the same song, under
+                    # the same strict match, has synced ones.
+                    body = self.search(request["artist"], track["title"], duration) or body
             synced = body.get("syncedLyrics")
-            if isinstance(synced, str) and re.search(r"\[\d{2,}:\d{2}(?:\.\d+)?\]", synced):
-                dest.with_suffix(".lrc").write_text(synced, encoding="utf-8")
+            if self.has_synced(body):
+                lrc = dest.with_suffix(".lrc")
+                temp = lrc.with_name("." + lrc.name + ".tmp")
+                temp.write_text(synced, encoding="utf-8")
+                os.replace(temp, lrc)  # the library is live: never show a half-written file
                 return "synced"
             return "instrumental" if body.get("instrumental") else "unavailable"
         except urllib.error.HTTPError as exc:
@@ -735,10 +747,26 @@ class Lyrics:
                 raise
             return "lookup_failed"
 
+    @staticmethod
+    def has_synced(body):
+        synced = body.get("syncedLyrics")
+        return isinstance(synced, str) and re.search(r"\[\d{2,}:\d{2}(?:\.\d+)?\]", synced) is not None
+
     def call(self, endpoint, params):
-        time.sleep(0.5)  # sequential lookups with ≥500 ms spacing
-        return json.loads(fetch(f"https://lrclib.net/api/{endpoint}?" + urllib.parse.urlencode(params),
-                                headers={"User-Agent": self.agent}))
+        address = f"https://lrclib.net/api/{endpoint}?" + urllib.parse.urlencode(params)
+        # Sequential lookups with ≥500 ms spacing. LRCLIB often answers 503 or drops a
+        # connection under load; that used to lose a song's lyrics for good, so those
+        # are retried after growing pauses. 404/429 are real answers.
+        for pause in (0.5, *LYRICS_RETRY_PAUSES):
+            time.sleep(pause)
+            try:
+                return json.loads(fetch(address, headers={"User-Agent": self.agent}))
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500 or pause == LYRICS_RETRY_PAUSES[-1]:
+                    raise
+            except OSError:
+                if pause == LYRICS_RETRY_PAUSES[-1]:
+                    raise
 
     def search(self, artist, title, duration):
         """Exact title and an artist credit naming the main artist (case-insensitive),
@@ -1243,6 +1271,56 @@ def remove(ids):
     scan_status = scan() if removed else "not_needed"
     emit("summary", ok=not failed, removed=removed, failed=failed, scan=scan_status)
     return 0 if not failed else 65
+
+
+def missing_lyrics():
+    """Retry LRCLIB, with the import's strict match, for every track without an .lrc.
+
+    Lyrics are often added to LRCLIB after a song is imported, and a failed lookup
+    used to be final. Nothing is downloaded but lyrics; tags are not touched.
+    """
+    root = library_root()
+    music = safe_dir(root / "music")
+    lyrics = Lyrics(root)
+    if not lyrics.agent:
+        emit("summary", ok=False, reason="lyrics_disabled", found=[], missing=[], scan="not_needed")
+        return 64
+    found, missing, not_attempted = [], [], []
+    with library_lock(root):
+        todo = [(folder, path) for folder in release_dirs(music) for path in audio_files(folder)
+                if not path.with_suffix(".lrc").exists()]
+        for i, (folder, path) in enumerate(todo):
+            release = RELEASE_DIR.search(folder.name).group(1)
+            try:
+                tags = read_tags(path)
+            except Exception:  # an unreadable file is reported, never fatal
+                missing.append({"release": release, "file": path.name, "lyrics": "unreadable_tags"})
+                continue
+            artist = tags.get("albumartist") or tags.get("artist")
+            if not artist or not tags.get("title"):
+                missing.append({"release": release, "file": path.name, "lyrics": "no_tags"})
+                continue
+            status = lyrics.get({"artist": artist, "album": tags.get("album") or ""},
+                                {"title": tags["title"]}, tags["duration"], path)
+            entry = {"release": release, "artist": artist, "title": tags["title"]}
+            if status == "synced":
+                found.append(entry)
+            else:
+                missing.append({**entry, "lyrics": status})
+            with contextlib.suppress(OSError, ValueError, KeyError, TypeError, AttributeError):
+                receipt = json.loads((folder / "provenance.json").read_text(encoding="utf-8"))
+                for track in receipt["tracks"]:
+                    if track["file"] == path.name and track.get("lyrics") != status:
+                        track["lyrics"] = status
+                        write_json(folder / "provenance.json", receipt)
+            if status == "rate_limited":
+                not_attempted = [{"release": RELEASE_DIR.search(f.name).group(1), "file": p.name}
+                                 for f, p in todo[i + 1:]]
+                break
+    scan_status = scan() if found else "not_needed"
+    emit("summary", ok=not not_attempted, found=found, missing=missing,
+         not_attempted=not_attempted, scan=scan_status)
+    return 0 if not not_attempted else 69
 
 
 # ---- Discovery: taste seeds, playlist queue, YouTube radio candidates ----
@@ -1827,6 +1905,8 @@ def main():
                       help='Fix tags/covers from {"changes": [...]}; audio is not re-downloaded')
     mode.add_argument("--remove", action="store_true",
                       help='Move {"releases": [...]} to the library trash; nothing is deleted')
+    mode.add_argument("--lyrics", action="store_true",
+                      help="Retry synced lyrics for every track without them; reads no stdin")
     mode.add_argument("--discover", action="store_true",
                       help="List songs to add: playlist queue, radio candidates, stale discoveries; reads no stdin")
     mode.add_argument("--seeds", action="store_true", help='Merge taste seeds {"artists": [...], "songs": [...], "notes": ...}')
@@ -1839,6 +1919,8 @@ def main():
             return library_page(args.library)
         if args.discover:
             return discover()
+        if args.lyrics:
+            return missing_lyrics()
         limit = MAX_PLAYLIST if args.queue else MAX_REQUEST
         raw = sys.stdin.buffer.read(limit + 1)
         if len(raw) > limit:

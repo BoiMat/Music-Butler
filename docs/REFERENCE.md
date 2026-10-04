@@ -58,7 +58,10 @@ and **real contact email or project URL** to enable synchronized lyrics. Blank
 disables lookups. The lookup matches on artist, title and the downloaded
 file's duration (±2 s). A YouTube upload with an intro, outro or dialogue has a
 different duration and usually gets no lyrics, which is why the skill prefers
-"Official Audio" uploads. Missing artwork or synced lyrics does not prevent import.
+"Official Audio" uploads. Missing artwork or synced lyrics does not prevent import. LRCLIB answers 503 under load
+and gains lyrics over time, so busy or failed requests are retried, a release entry with
+only plain lyrics falls back to the same strict search, and `butler.sh lyrics` (run by the
+weekly audit) retries every song that still has none.
 
 Each release emits a JSON `complete` event with files, hashes, lyrics/artwork
 status and scan status. The last line is always one `summary` event listing what
@@ -72,6 +75,7 @@ request is **not** a guarantee that the library is already indexed.
 
 ```sh
 ./scripts/butler.sh library [page]   # releases, 20 per page: id, tags, cover/lyrics status (JSON)
+./scripts/butler.sh lyrics           # retry synced lyrics for every song without them
 ./scripts/butler.sh retag <id>       # requests/retag-<id>.json: {"changes": [{"release", "track"?,
                                      #   "artist"?, "artists"?, "album"?, "title"?, "year"?,
                                      #   "cover_from"? (a YouTube link) | "artwork_url"?}]}
