@@ -129,7 +129,8 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   `music-butler:<origin>`. Bulk origins skip songs already in the library
   instead of failing the request.
 - *Discover Weekly* is a Navidrome smart playlist (`.nsp` in the music folder,
-  written by `discover`) of the discoveries of the last 7 days: play it on
+  written by `discover`) of the discoveries of the last 6 days (so last week's batch
+  is gone by the Sunday 10:00 audit, before the new one lands): play it on
   Sunday and give 1 star to what you do not want. Smart playlists belong to the
   admin; `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes it visible to the Tempo
   account. Navidrome re-evaluates a smart playlist only when its owner opens it,

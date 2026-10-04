@@ -1354,8 +1354,11 @@ NOISE = re.compile(r"\b(?:covers?|covered|fan[ -]?(?:made|edit)|sped[ -]?up|slow
 MAIN_ARTIST = re.compile(r"\s*(?:,|;|&|\bx\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\band\b|\bwith\b|\bvs\.?)\s*", re.I)
 PLAYLISTS = {  # Navidrome smart playlists, kept in the library's music folder
     "Discover Weekly.nsp": {
-        "name": "Discover Weekly", "comment": "Songs Music Butler discovered in the last week",
-        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": 7}}],
+        "name": "Discover Weekly", "comment": "This week's discoveries: give 1 star to what you do not want",
+        # 6 days, not 7: the playlist is only re-evaluated when butler.sh playlists runs. By
+        # the Sunday audit refresh last week's batch is ~6 days 23 hours old, so it is gone
+        # before the new one lands; with 7 it would race the new run by a few minutes.
+        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": 6}}],
         "sort": "dateadded", "order": "desc", "limit": 100},
 }
 
