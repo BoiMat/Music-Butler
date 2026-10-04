@@ -34,8 +34,9 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   your taste ("Italian pop, no trap").
 - **Weekly discovery**: new songs from the YouTube Music radios of songs you
   liked or rated highly, at least 5 by artists new to you, in a
-  *Discover Weekly* smart playlist. 1★ removes a song. Discoveries you never
-  play are pruned after four weeks.
+  *Discover Weekly* playlist. 1★ removes a song. After four weeks, a discovery
+  you have not liked, rated or played twice is removed; *Discoveries to rate*
+  lists the ones still waiting.
 - **Weekly audit**: a stronger model checks tags and covers and fixes what it is
   sure about, and lyrics are retried for songs that had none (LRCLIB grows).
 - **Safe defaults**: hardened containers (read-only, no capabilities, non-root),

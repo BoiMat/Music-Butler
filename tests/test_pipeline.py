@@ -448,7 +448,7 @@ class NetworkMocks(unittest.TestCase):
         old = self.root / "Discoveries to rate.nsp"
         old.write_text('{"old": true}')
         b.ensure_playlists(self.root)
-        self.assertEqual(json.loads(old.read_text())["all"][1], {"inTheLast": {"dateadded": b.STALE_DAYS}})
+        self.assertFalse(old.exists())  # replaced by the listener's own playlist
         self.assertTrue((self.root / "Discover Weekly.nsp").is_file())
 
     def test_scan_post_token_and_errors(self):
@@ -632,7 +632,7 @@ class Discovery(unittest.TestCase):
                  {"title": "Four", "album": "Four", "duration": 180, "userRating": 5},
                  {"title": "Unknown", "album": "X", "playCount": 9}]
         stats = b.track_stats(releases, songs)
-        self.assertEqual(stats[("b" * 32, 1)], {"plays": 3, "starred": False, "rating": 0})
+        self.assertEqual(stats[("b" * 32, 1)], {"plays": 3, "starred": False, "rating": 0, "ids": []})
         self.assertEqual(stats[("d" * 32, 1)]["rating"], 5)
         today = b.datetime.datetime(2026, 9, 30, tzinfo=b.datetime.timezone.utc)
         self.assertEqual([r["id"] for r in b.stale_releases(releases, stats, today)], ["a" * 32])
@@ -657,7 +657,7 @@ class Discovery(unittest.TestCase):
         page = {"status": "ok", "searchResult3": {"song": [{"title": "T", "album": "A", "playCount": 1}]}}
         with patch.object(b, "subsonic", return_value=page) as api:
             self.assertEqual(b.listening([{"id": "a" * 32, "album": "A", "tracks": [{"n": 1, "title": "T"}]}]),
-                             {("a" * 32, 1): {"plays": 1, "starred": False, "rating": 0}})
+                             {("a" * 32, 1): {"plays": 1, "starred": False, "rating": 0, "ids": []}})
             self.assertEqual(api.call_args.kwargs["account"], "NAVIDROME")
             with patch.dict(os.environ, {"NAVIDROME_LISTENER_USER": "tempo"}):
                 b.listening([])
@@ -1170,26 +1170,93 @@ class RefreshPlaylists(unittest.TestCase):
             if endpoint == "getScanStatus":
                 return {"scanStatus": {"scanning": next(scanning)}}
             if endpoint == "getPlaylists":
-                return {"playlists": {"playlist": [{"id": "1", "name": "Discover Weekly"},
-                                                   {"id": "2", "name": "Mine"},
-                                                   {"id": "3", "name": "Discoveries to rate"}]}}
+                return {"playlists": {"playlist": [{"id": "1", "name": "Discover Weekly", "owner": "admin"},
+                                                   {"id": "2", "name": "Mine", "owner": "admin"},
+                                                   {"id": "3", "name": "Discoveries to rate", "owner": "admin"},
+                                                   {"id": "4", "name": "Discoveries to rate", "owner": "tempo"}]}}
+            if endpoint == "deletePlaylist":
+                return {}
             return {"playlist": {"entry": [{}] * int(params["id"])}}
-        with patch.object(b, "scan", return_value="requested"), patch.object(b, "subsonic", side_effect=fake_subsonic), \
-                patch.object(b.time, "sleep"), contextlib.redirect_stdout(io.StringIO()) as output:
+        env = {"NAVIDROME_USER": "admin", "NAVIDROME_LISTENER_USER": "tempo"}
+        with patch.dict(os.environ, env), patch.object(b, "scan", return_value="requested"), \
+                patch.object(b, "subsonic", side_effect=fake_subsonic), patch.object(b, "ensure_playlists"), \
+                patch.object(b, "library_root", return_value=Path(tempfile.mkdtemp())), \
+                patch.object(b, "rebuild_to_rate", return_value=7), patch.object(b.time, "sleep"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(b.refresh_playlists(), 0)
+        # The admin's old smart "Discoveries to rate" is deleted; the listener's stays.
         self.assertEqual(calls, [("getScanStatus", None), ("getScanStatus", None), ("getPlaylists", None),
-                                 ("getPlaylist", "1"), ("getPlaylist", "3")])
+                                 ("getPlaylist", "1"), ("deletePlaylist", "3")])
         summary = json.loads(output.getvalue())
         self.assertTrue(summary["ok"])
         self.assertEqual(summary["refreshed"], [{"name": "Discover Weekly", "songs": 1},
-                                                {"name": "Discoveries to rate", "songs": 3}])
+                                                {"name": "Discoveries to rate", "songs": 7}])
 
     def test_without_admin_account_nothing_happens(self):
         with patch.object(b, "scan", return_value="scheduled"), patch.object(b, "subsonic") as subsonic, \
+                patch.object(b, "ensure_playlists"), patch.object(b, "library_root", return_value=Path(tempfile.mkdtemp())), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(b.refresh_playlists(), 0)
         subsonic.assert_not_called()
         self.assertEqual(json.loads(output.getvalue())["reason"], "admin_account_not_configured")
+
+
+class ToRate(unittest.TestCase):
+    RELEASES = [{"id": "a" * 32, "origin": "discovery", "added": "2026-10-04T09:00:00+00:00", "tracks": [{"n": 1}]},
+                {"id": "b" * 32, "origin": "discovery", "added": "2026-10-05T09:00:00+00:00", "tracks": [{"n": 1}]},
+                {"id": "c" * 32, "origin": "discovery", "added": "2026-10-03T09:00:00+00:00", "tracks": [{"n": 1}]},
+                {"id": "d" * 32, "origin": "playlist", "added": "2026-10-05T09:00:00+00:00", "tracks": [{"n": 1}]},
+                {"id": "e" * 32, "origin": "discovery", "added": "2026-10-05T09:00:00+00:00", "tracks": [{"n": 1}]}]
+
+    def stats(self, **overrides):
+        base = {k * 32: {"plays": 0, "starred": False, "rating": 0, "ids": [k]} for k in "abcde"}
+        for key, value in overrides.items():
+            base[key * 32].update(value)
+        return {(rid, 1): s for rid, s in base.items()}
+
+    def test_lists_discoveries_not_yet_liked_rated_or_played_twice_newest_first(self):
+        stats = self.stats(c={"plays": 1}, e={"starred": True})
+        self.assertEqual(b.to_rate(self.RELEASES, stats), ["b", "a", "c"])
+        for kept in ({"plays": 2}, {"rating": 2}, {"starred": True}):
+            self.assertNotIn("a", b.to_rate(self.RELEASES, self.stats(a=kept)))
+        # Not yet indexed by Navidrome (no id): nothing to put in the playlist.
+        self.assertNotIn("a", b.to_rate(self.RELEASES, self.stats(a={"ids": []})))
+
+    def rebuild(self, existing, songs):
+        calls = []
+        def fake_subsonic(endpoint, params=None, account=None, **kwargs):
+            calls.append((endpoint, params))
+            if endpoint == "getPlaylists":
+                return {"playlists": {"playlist": existing}}
+            if endpoint == "getPlaylist":
+                return {"playlist": {"entry": [{}, {}]}}
+            return {}
+        with patch.dict(os.environ, {"NAVIDROME_LISTENER_USER": "tempo"}), \
+                patch.object(b, "read_library", return_value=[]), patch.object(b, "listening", return_value={}), \
+                patch.object(b, "to_rate", return_value=songs), patch.object(b, "subsonic", side_effect=fake_subsonic):
+            self.assertEqual(b.rebuild_to_rate(), len(songs))
+        return [(e, p) for e, p in calls if e != "getPlaylists"]
+
+    def test_replaces_the_listeners_playlist(self):
+        mine = [{"id": "p1", "name": "Discoveries to rate", "owner": "tempo"},
+                {"id": "p2", "name": "Discoveries to rate", "owner": "tempo"},
+                {"id": "x", "name": "Discoveries to rate", "owner": "someone"}]
+        calls = self.rebuild(mine, ["s1", "s2"])
+        self.assertEqual(calls[0], ("deletePlaylist", {"id": "p2"}))
+        self.assertEqual(calls[1], ("createPlaylist", {"playlistId": "p1", "songId": ["s1", "s2"]}))
+        self.assertEqual(calls[2][1]["playlistId"], "p1")
+
+    def test_creates_it_once_and_empties_it_when_nothing_is_left(self):
+        self.assertEqual(self.rebuild([], ["s1"])[0], ("createPlaylist", {"name": "Discoveries to rate", "songId": ["s1"]}))
+        calls = self.rebuild([{"id": "p1", "name": "Discoveries to rate", "owner": "tempo"}], [])
+        self.assertIn(("updatePlaylist", {"playlistId": "p1", "songIndexToRemove": [0, 1]}), calls)
+        self.assertNotIn("createPlaylist", [e for e, _ in calls])
+
+    def test_unknown_listening_changes_nothing(self):
+        with patch.object(b, "read_library", return_value=[]), patch.object(b, "listening", return_value=None), \
+                patch.object(b, "subsonic") as subsonic:
+            self.assertIsNone(b.rebuild_to_rate())
+        subsonic.assert_not_called()
 
 
 if __name__ == "__main__":

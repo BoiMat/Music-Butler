@@ -823,7 +823,7 @@ def subsonic(endpoint, params=None, limit=MAX_RESPONSE, account="NAVIDROME"):
     salt = secrets.token_hex(16)
     token = hashlib.md5((password + salt).encode("utf-8")).hexdigest()  # Required by Subsonic, not password storage.
     body = urllib.parse.urlencode({"u": user, "t": token, "s": salt, "v": "1.16.1",
-                                  "c": "music-butler", "f": "json", **(params or {})}).encode()
+                                  "c": "music-butler", "f": "json", **(params or {})}, doseq=True).encode()
     result = json.loads(fetch(base + "/rest/" + endpoint + ".view", data=body, limit=limit,
                              headers={"Content-Type": "application/x-www-form-urlencoded"}))
     response = result.get("subsonic-response", {})
@@ -1358,15 +1358,12 @@ PLAYLISTS = {  # Navidrome smart playlists, kept in the library's music folder
         "name": "Discover Weekly", "comment": "Songs Music Butler discovered in the last week",
         "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": 7}}],
         "sort": "dateadded", "order": "desc", "limit": 100},
-    # Play counts and ratings in smart playlists are the playlist owner's (the admin), not
-    # the listener's, so this one only uses the date: rate these before they are pruned.
-    "Discoveries to rate.nsp": {
-        "name": "Discoveries to rate",
-        "comment": "Discoveries of the last 4 weeks. Like or rate 4-5 stars to get more like them; "
-                   "1 star removes a song; unliked, unrated ones played less than twice leave after 4 weeks",
-        "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": STALE_DAYS}}],
-        "sort": "dateadded", "order": "desc", "limit": 200},
 }
+# Smart playlists judge ratings and plays by their owner (the admin), not the listener,
+# so "Discoveries to rate" is a normal playlist of the listener's, rebuilt by
+# refresh_playlists. Its old smart version is removed.
+TO_RATE = "Discoveries to rate"
+OLD_PLAYLISTS = ("Discoveries to rate.nsp",)
 
 
 SCAN_WAIT = 600  # seconds to wait for Navidrome to index new songs before refreshing playlists
@@ -1377,8 +1374,10 @@ def refresh_playlists():
 
     Navidrome evaluates a smart playlist only when its owner opens it, and the .nsp
     playlists belong to the admin, while the user listens with another account:
-    without this, Tempo shows the songs of the last time the admin looked.
+    without this, Tempo shows the songs of the last time the admin looked. Also rebuilds
+    the listener's "Discoveries to rate", which a smart playlist cannot express.
     """
+    ensure_playlists(safe_dir(library_root() / "music"))
     if scan() != "requested":
         emit("summary", ok=False, reason="admin_account_not_configured", refreshed=[])
         return 0
@@ -1392,13 +1391,57 @@ def refresh_playlists():
             emit("summary", ok=False, reason="scan_still_running", refreshed=[])
             return 69
     names = {p["name"] for p in PLAYLISTS.values()}
+    listener = os.environ.get("NAVIDROME_LISTENER_USER", "")
     refreshed = []
     for playlist in (subsonic("getPlaylists") or {}).get("playlists", {}).get("playlist", []):
         if playlist.get("name") in names:
             full = (subsonic("getPlaylist", {"id": playlist["id"]}) or {}).get("playlist") or {}
             refreshed.append({"name": playlist["name"], "songs": len(full.get("entry") or [])})
-    emit("summary", ok=len(refreshed) == len(names), refreshed=refreshed)
+        elif (playlist.get("name") == TO_RATE and listener and playlist.get("owner") != listener
+              and playlist.get("owner") == os.environ.get("NAVIDROME_USER")):
+            subsonic("deletePlaylist", {"id": playlist["id"]})  # the old smart version
+    to_rate_songs = rebuild_to_rate()
+    if to_rate_songs is not None:
+        refreshed.append({"name": TO_RATE, "songs": to_rate_songs})
+    emit("summary", ok=len(refreshed) == len(names) + 1, refreshed=refreshed)
     return 0
+
+
+def rebuild_to_rate():
+    """Replace the listener's "Discoveries to rate" with the discoveries that still need
+    a like, a rating or a second play. Returns its size, or None if listening is unknown."""
+    releases = read_library()
+    stats = listening(releases)
+    if stats is None:
+        return None
+    songs = to_rate(releases, stats)
+    account = "NAVIDROME_LISTENER" if os.environ.get("NAVIDROME_LISTENER_USER") else "NAVIDROME"
+    owner = os.environ.get(account + "_USER")
+    mine = [p for p in (subsonic("getPlaylists", account=account) or {}).get("playlists", {}).get("playlist", [])
+            if p.get("name") == TO_RATE and p.get("owner") == owner]
+    for extra in mine[1:]:
+        subsonic("deletePlaylist", {"id": extra["id"]}, account=account)
+    if mine and not songs:
+        # Replacing with no songs is not clearing on every server: remove them one by one.
+        current = (subsonic("getPlaylist", {"id": mine[0]["id"]}, account=account) or {}).get("playlist") or {}
+        indexes = list(range(len(current.get("entry") or [])))
+        if indexes:
+            subsonic("updatePlaylist", {"playlistId": mine[0]["id"], "songIndexToRemove": indexes}, account=account)
+    else:
+        params = {"playlistId": mine[0]["id"]} if mine else {"name": TO_RATE}
+        subsonic("createPlaylist", {**params, "songId": songs}, account=account)
+    if mine:
+        subsonic("updatePlaylist", {"playlistId": mine[0]["id"], "comment": TO_RATE_COMMENT}, account=account)
+    else:
+        created = [p for p in (subsonic("getPlaylists", account=account) or {}).get("playlists", {}).get("playlist", [])
+                   if p.get("name") == TO_RATE and p.get("owner") == owner]
+        for p in created[:1]:
+            subsonic("updatePlaylist", {"playlistId": p["id"], "comment": TO_RATE_COMMENT}, account=account)
+    return len(songs)
+
+
+TO_RATE_COMMENT = ("Discoveries that leave 4 weeks after they were added unless you like them, rate "
+                   "them (2-5 stars) or play them twice. 1 star removes a song at once.")
 
 
 def main_artist(value):
@@ -1622,7 +1665,9 @@ def track_stats(releases, songs):
         rid, n, _ = min(found, key=lambda f: abs(f[2] - duration))
         plays = song.get("playCount") if isinstance(song.get("playCount"), int) else 0
         rating = song.get("userRating") if isinstance(song.get("userRating"), int) else 0
-        entry = stats.setdefault((rid, n), {"plays": 0, "starred": False, "rating": 0})
+        entry = stats.setdefault((rid, n), {"plays": 0, "starred": False, "rating": 0, "ids": []})
+        if isinstance(song.get("id"), str):
+            entry["ids"].append(song["id"])
         entry["plays"] += plays
         entry["starred"] = entry["starred"] or bool(song.get("starred"))
         entry["rating"] = max(entry["rating"], rating)
@@ -1772,6 +1817,25 @@ def score(radios, skip_keys, skip_videos, skip_artists, titles=None):
     return ranked
 
 
+def kept(s):
+    """A discovery stays past STALE_DAYS once it is liked, rated or played twice."""
+    return s.get("plays", 0) >= 2 or s.get("starred") or s.get("rating")
+
+
+def to_rate(releases, stats):
+    """Navidrome ids of discovered songs that are not liked, rated or played twice yet:
+    the ones that leave after STALE_DAYS unless the user does something. Newest first."""
+    songs = []
+    for rel in releases:
+        if rel.get("origin") != "discovery":
+            continue
+        for t in rel["tracks"]:
+            s = stats.get((rel["id"], t["n"]))
+            if s and s["ids"] and not kept(s):
+                songs.append((rel.get("added") or "", s["ids"][0]))
+    return [song for _, song in sorted(songs, reverse=True)]
+
+
 def stale_releases(releases, stats, today):
     """Releases to remove: any rated 1 star, and discoveries older than STALE_DAYS that
     are not liked, not rated and played fewer than 2 times."""
@@ -1787,7 +1851,7 @@ def stale_releases(releases, stats, today):
                 continue
             if (today - added).days < STALE_DAYS:
                 continue
-            if any(s.get("plays", 0) >= 2 or s.get("starred") or s.get("rating") for s in heard):
+            if any(kept(s) for s in heard):
                 continue
         out.append({"id": rel["id"], "artist": rel["artist"], "titles": [t.get("title") for t in rel["tracks"]],
                     "added": rel["added"][:10]})
@@ -1796,6 +1860,10 @@ def stale_releases(releases, stats, today):
 
 def ensure_playlists(music):
     """Write Music Butler's smart playlists; Navidrome re-reads a changed file."""
+    for name in OLD_PLAYLISTS:
+        with contextlib.suppress(OSError):
+            if (music / name).is_file() and not (music / name).is_symlink():
+                (music / name).unlink()
     for name, rules in PLAYLISTS.items():
         path, content = music / name, json.dumps(rules, indent=2)
         with contextlib.suppress(OSError):

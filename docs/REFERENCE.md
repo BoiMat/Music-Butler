@@ -128,13 +128,18 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   kept in `provenance.json`, shown by `library` and written as the comment tag
   `music-butler:<origin>`. Bulk origins skip songs already in the library
   instead of failing the request.
-- `discover` also writes two Navidrome smart playlists into the music folder:
-  *Discover Weekly* (discoveries of the last 7 days) and *Discoveries to rate*
-  (the last 4 weeks). Navidrome evaluates smart-playlist play counts and ratings
-  for the playlist's owner (the admin), so these rules use only dates;
-  `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes them visible to the Tempo account. Navidrome re-evaluates a smart playlist only when its owner opens it, so
-  `scheduled.sh` runs `butler.sh playlists` after every job: it waits for the scan and opens
-  both as the admin.
+- Two playlists show the discoveries in Tempo:
+  - *Discover Weekly*: a Navidrome smart playlist (`.nsp` in the music folder,
+    written by `discover`) of the discoveries of the last 7 days. Smart
+    playlists belong to the admin; `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes it
+    visible to the Tempo account.
+  - *Discoveries to rate*: a normal playlist of the listening account with the
+    discoveries that are not liked, rated or played twice yet, i.e. the ones that
+    leave after 4 weeks unless you act. A smart playlist cannot express this:
+    its rating and play rules use the owner's (admin's) data.
+  Navidrome re-evaluates a smart playlist only when its owner opens it, so
+  `scheduled.sh` runs `butler.sh playlists` after every job: it waits for the
+  scan, opens *Discover Weekly* as the admin and rebuilds *Discoveries to rate*.
 - State lives in `<library>/discovery/` (`seeds.json`, `queue.json`,
   `history.json`) and is backed up with the library.
 
