@@ -25,7 +25,7 @@ def main():
          "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "128",
          "--tmpfs", "/tmp:rw,noexec,nosuid,size=128m,mode=1777", "-e", "HOME=/tmp",
          "-v", str(ROOT) + ":/work:ro", "-w", "/work", "--entrypoint", "python3",
-         "music-butler-tools:local", "-m", "unittest", "discover", "-s", "tests", "-v"])
+         os.environ.get("TOOLS_IMAGE", "music-butler-tools:local"), "-m", "unittest", "discover", "-s", "tests", "-v"])
     name = "music-butler-smoke-" + uuid.uuid4().hex[:12]
     storage = ROOT / "storage"
     storage.mkdir(exist_ok=True)

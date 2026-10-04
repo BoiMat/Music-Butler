@@ -176,6 +176,11 @@ better than the weekly picks. A mid-size hosted model works well for `weekly`.
   `LRCLIB_USER_AGENT` is set.
 - **Backups.** `scripts/backup.sh` makes encrypted restic snapshots to a USB
   drive or any repository. See [backups](docs/REFERENCE.md#backups).
+- **A second instance** (another person, same machine): clone the repo again and
+  give its `.env` its own `COMPOSE_PROJECT_NAME`, `TOOLS_IMAGE` and
+  `NAVIDROME_PORT` **before** the first `docker compose up`; otherwise it takes
+  over the first instance's containers or image. Then a separate agent profile,
+  installed from that clone.
 
 ## Documentation
 

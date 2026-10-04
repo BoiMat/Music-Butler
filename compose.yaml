@@ -14,7 +14,8 @@ x-hardening: &hardening
 
 x-tooling: &tooling
   <<: *hardening
-  image: music-butler-tools:local
+  # One tag per clone: the image contains scripts/music_butler.py.
+  image: ${TOOLS_IMAGE:-music-butler-tools:local}
   build:
     context: .
     dockerfile: docker/Dockerfile
