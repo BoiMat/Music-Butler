@@ -273,6 +273,19 @@ live stack.
   longer music-video edit).
 - Not tested: a Linux host, a phone connection to this test instance.
 
+## Whole-playlist import (2026-10-04) — executed
+
+- `butler.sh playlist random` (50-song Exportify CSV, 15 already in the library)
+  on the live deployment, with `PLAYLIST_NOTIFY` = `hermes send` to Telegram:
+  the command returned at once; the import ran detached (own session) and
+  finished in about 10 minutes: 2 batches, 34 added, 0 failed, 1 "no certain
+  match" (Men At Work - Down Under). Two reports were sent, no send failures.
+- Spot checks: "Overkill - Acoustic Version" matched the acoustic release;
+  "Turn The Lights Off - Radio Edit" (179 s) matched YouTube Music's "(Album
+  Version)" at the same length.
+- Not yet seen: a CSV sent to the bot on Telegram (`butler.sh inbox`), and an
+  import waiting for a busy library outside the tests.
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):
