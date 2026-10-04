@@ -85,10 +85,9 @@ totals["failed"] += [f"{f['song']} ({f.get('detail') or f['reason']})" for f in 
 totals["not_matched"] += s["not_matched"]
 json.dump(totals, open(totals_path, "w"))
 done = s["remaining"] == 0
-lines = [f"Playlist {playlist}: {s['in_library']} of {s['songs']} songs in the library"
+# Brief: counts only; songs are named only when they need the user (failed, no match).
+lines = [f"Playlist {playlist}: +{len(s['added'])} imported, {s['in_library']} of {s['songs']} songs in the library"
          + (", import finished." if done else f", {s['remaining']} to go.")]
-if s["added"]:
-    lines.append(f"Added {len(s['added'])}: " + "; ".join(s["added"]))
 if s["failed"]:
     lines.append("Failed: " + "; ".join(f"{f['song']} ({f.get('detail') or f['reason']})" for f in s["failed"]))
 if s["not_matched"]:

@@ -77,10 +77,10 @@ json.dump(lines, open(path, "w"))
         self.assertEqual(result.returncode, 0, result.stderr)
         reports = self.sent.read_text().split("----\n")[:-1]
         self.assertEqual(len(reports), 2)  # the busy wait is silent
-        self.assertIn("10 of 30 songs in the library, 18 to go.", reports[0])
-        self.assertIn("Added 2: A - 1; A - 2", reports[0])
+        self.assertIn("Playlist mix: +2 imported, 10 of 30 songs in the library, 18 to go.", reports[0])
+        self.assertNotIn("A - 1", reports[0])  # imported songs are counted, not listed
         self.assertIn("Failed: B - 3 (ERROR: 403)", reports[0])
-        self.assertIn("13 of 30 songs in the library, import finished.", reports[1])
+        self.assertIn("+1 imported, 13 of 30 songs in the library, import finished.", reports[1])
         self.assertIn("No certain match: D - 5", reports[1])
         self.assertIn("In total 1 failed and 1 had no certain match", reports[1])
         self.assertIn("import finished", (self.home / "requests" / "spotify-mix.log").read_text())
