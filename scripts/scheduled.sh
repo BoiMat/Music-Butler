@@ -11,6 +11,7 @@
 #            its answer, e.g. claude -p --allowedTools Bash(scripts/butler.sh:*),Bash(./scripts/butler.sh:*),Read,Edit(requests/**)
 #            (split on spaces, no shell quoting)
 #   BOOTSTRAP_TARGET   library size that ends the bootstrap (default 150)
+#   BUTLER_BIN         butler.sh to refresh playlists with (default scripts/butler.sh)
 set -Eeuo pipefail
 IFS=$'\n\t'
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
@@ -119,5 +120,9 @@ REPO in it means this folder: run butler.sh exactly as scripts/butler.sh, write 
     '') echo 'SCHEDULE_AGENT is not set (hermes or command); see README "Scheduled runs"' >&2; exit 64 ;;
     *) echo "unknown SCHEDULE_AGENT: $agent (hermes or command)" >&2; exit 64 ;;
 esac
+# Navidrome re-evaluates the smart playlists (Discover Weekly...) only when their
+# owner, the admin, opens them; the listener's Tempo would show stale songs. Its
+# output is not part of the report.
+"$(setting BUTLER_BIN scripts/butler.sh)" playlists > /dev/null 2>&1 || true
 # Exit 0 either way: a failed job still delivers its report and this line.
 (( status == 0 )) || printf 'Music %s run exited with status %s.\n' "$job" "$status"

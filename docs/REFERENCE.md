@@ -132,7 +132,9 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   *Discover Weekly* (discoveries of the last 7 days) and *Discoveries to rate*
   (the last 4 weeks). Navidrome evaluates smart-playlist play counts and ratings
   for the playlist's owner (the admin), so these rules use only dates;
-  `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes them visible to the Tempo account.
+  `ND_DEFAULTPLAYLISTPUBLICVISIBILITY` makes them visible to the Tempo account. Navidrome re-evaluates a smart playlist only when its owner opens it, so
+  `scheduled.sh` runs `butler.sh playlists` after every job: it waits for the scan and opens
+  both as the admin.
 - State lives in `<library>/discovery/` (`seeds.json`, `queue.json`,
   `history.json`) and is backed up with the library.
 

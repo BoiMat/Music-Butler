@@ -1362,11 +1362,43 @@ PLAYLISTS = {  # Navidrome smart playlists, kept in the library's music folder
     # the listener's, so this one only uses the date: rate these before they are pruned.
     "Discoveries to rate.nsp": {
         "name": "Discoveries to rate",
-        "comment": "Discoveries of the last 4 weeks. Rate them: 1-2 stars removes a song, "
-                   "4-5 stars brings more like it; unplayed, unrated ones leave after 4 weeks",
+        "comment": "Discoveries of the last 4 weeks. Like or rate 4-5 stars to get more like them; "
+                   "1 star removes a song; unliked, unrated ones played less than twice leave after 4 weeks",
         "all": [{"contains": {"comment": "music-butler:discovery"}}, {"inTheLast": {"dateadded": STALE_DAYS}}],
         "sort": "dateadded", "order": "desc", "limit": 200},
 }
+
+
+SCAN_WAIT = 600  # seconds to wait for Navidrome to index new songs before refreshing playlists
+
+
+def refresh_playlists():
+    """Make Navidrome re-evaluate the smart playlists after songs were added.
+
+    Navidrome evaluates a smart playlist only when its owner opens it, and the .nsp
+    playlists belong to the admin, while the user listens with another account:
+    without this, Tempo shows the songs of the last time the admin looked.
+    """
+    if scan() != "requested":
+        emit("summary", ok=False, reason="admin_account_not_configured", refreshed=[])
+        return 0
+    deadline = time.time() + SCAN_WAIT
+    while True:
+        time.sleep(5)
+        status = (subsonic("getScanStatus") or {}).get("scanStatus") or {}
+        if not status.get("scanning"):
+            break
+        if time.time() > deadline:
+            emit("summary", ok=False, reason="scan_still_running", refreshed=[])
+            return 69
+    names = {p["name"] for p in PLAYLISTS.values()}
+    refreshed = []
+    for playlist in (subsonic("getPlaylists") or {}).get("playlists", {}).get("playlist", []):
+        if playlist.get("name") in names:
+            full = (subsonic("getPlaylist", {"id": playlist["id"]}) or {}).get("playlist") or {}
+            refreshed.append({"name": playlist["name"], "songs": len(full.get("entry") or [])})
+    emit("summary", ok=len(refreshed) == len(names), refreshed=refreshed)
+    return 0
 
 
 def main_artist(value):
@@ -1918,6 +1950,8 @@ def main():
                       help='Fix tags/covers from {"changes": [...]}; audio is not re-downloaded')
     mode.add_argument("--remove", action="store_true",
                       help='Move {"releases": [...]} to the library trash; nothing is deleted')
+    mode.add_argument("--playlists", action="store_true",
+                      help="Wait for the scan, then refresh the smart playlists as their owner; reads no stdin")
     mode.add_argument("--lyrics", action="store_true",
                       help="Retry synced lyrics for every track without them; reads no stdin")
     mode.add_argument("--discover", action="store_true",
@@ -1934,6 +1968,8 @@ def main():
             return discover()
         if args.lyrics:
             return missing_lyrics()
+        if args.playlists:
+            return refresh_playlists()
         limit = MAX_PLAYLIST if args.queue else MAX_REQUEST
         raw = sys.stdin.buffer.read(limit + 1)
         if len(raw) > limit:

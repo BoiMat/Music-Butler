@@ -15,13 +15,17 @@ class Scheduled(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.library = self.tmp / "library"
         (self.library / "music" / "release").mkdir(parents=True)
+        # Records its arguments instead of refreshing Navidrome's playlists.
+        self.butler = self.tmp / "butler.sh"
+        self.butler.write_text('#!/bin/sh\necho "$@" >> "$(dirname "$0")/butler-calls"\necho noise\n')
+        self.butler.chmod(0o755)
 
     def run_job(self, job, **env):
         # Variables set in the environment, even empty, win over the checkout's .env.
         full = dict(os.environ, MUSIC_LIBRARY_PATH=str(self.library), SCHEDULE_AGENT="command",
                     SCHEDULE_COMMAND="cat", SCHEDULE_PROVIDER="", SCHEDULE_MODEL="",
                     SCHEDULE_MODEL_WEEKLY="", BOOTSTRAP_TARGET="", HERMES_PROFILE="",
-                    HERMES_BIN="", HERMES_HOME=str(self.tmp / "hermes"))
+                    HERMES_BIN="", HERMES_HOME=str(self.tmp / "hermes"), BUTLER_BIN=str(self.butler))
         full.update(env)
         return subprocess.run([str(SCRIPT), job], env=full, text=True, capture_output=True, timeout=60)
 
@@ -30,6 +34,11 @@ class Scheduled(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Weekly music discovery", result.stdout)
         self.assertIn("skills/music-discover/SKILL.md in the current folder", result.stdout)
+
+    def test_playlists_are_refreshed_after_the_run_without_touching_the_report(self):
+        result = self.run_job("weekly")
+        self.assertNotIn("noise", result.stdout)
+        self.assertEqual((self.tmp / "butler-calls").read_text(), "playlists\n")
 
     def test_bootstrap_reports_completion_once_then_stays_silent(self):
         for name in ("a.mp3", "b.flac"):

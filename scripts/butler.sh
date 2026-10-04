@@ -20,6 +20,7 @@ Usage: scripts/butler.sh <command>
                    (JSON; "pages" says how many; default page 1)
   retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
   lyrics           retry synced lyrics (LRCLIB) for every song without them
+  playlists        after imports: wait for the scan, refresh Discover Weekly etc.
   remove <id>      move releases in requests/remove-<id>.json to the library trash
   discover         songs to add next: playlist queue, radio candidates, stale
                    discoveries (JSON; downloads nothing)
@@ -110,6 +111,9 @@ case "${1:-}" in
         ;;
     lyrics)
         "${compose[@]}" run --rm -T downloader --lyrics < /dev/null
+        ;;
+    playlists)
+        "${compose[@]}" run --rm -T downloader --playlists < /dev/null
         ;;
     retag)
         file="$(request_file retag "${2:-}")"

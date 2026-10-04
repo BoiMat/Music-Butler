@@ -1161,5 +1161,36 @@ class MissingLyrics(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
 
 
+class RefreshPlaylists(unittest.TestCase):
+    def test_waits_for_the_scan_then_opens_each_smart_playlist(self):
+        calls = []
+        scanning = iter([True, False])
+        def fake_subsonic(endpoint, params=None, **kwargs):
+            calls.append((endpoint, (params or {}).get("id")))
+            if endpoint == "getScanStatus":
+                return {"scanStatus": {"scanning": next(scanning)}}
+            if endpoint == "getPlaylists":
+                return {"playlists": {"playlist": [{"id": "1", "name": "Discover Weekly"},
+                                                   {"id": "2", "name": "Mine"},
+                                                   {"id": "3", "name": "Discoveries to rate"}]}}
+            return {"playlist": {"entry": [{}] * int(params["id"])}}
+        with patch.object(b, "scan", return_value="requested"), patch.object(b, "subsonic", side_effect=fake_subsonic), \
+                patch.object(b.time, "sleep"), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.refresh_playlists(), 0)
+        self.assertEqual(calls, [("getScanStatus", None), ("getScanStatus", None), ("getPlaylists", None),
+                                 ("getPlaylist", "1"), ("getPlaylist", "3")])
+        summary = json.loads(output.getvalue())
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["refreshed"], [{"name": "Discover Weekly", "songs": 1},
+                                                {"name": "Discoveries to rate", "songs": 3}])
+
+    def test_without_admin_account_nothing_happens(self):
+        with patch.object(b, "scan", return_value="scheduled"), patch.object(b, "subsonic") as subsonic, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.refresh_playlists(), 0)
+        subsonic.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["reason"], "admin_account_not_configured")
+
+
 if __name__ == "__main__":
     unittest.main()
