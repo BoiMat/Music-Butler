@@ -8,8 +8,8 @@
 #   PLAYLIST_NOTIFY    command that reads a report on stdin, split on spaces, e.g.
 #                      hermes -p music-butler send --to telegram --quiet
 #   PLAYLIST_INBOX     folder to pick new playlist CSVs up from
-#   PLAYLIST_IMPORTER, PLAYLIST_SYNCER  importer commands (default: the downloader
-#                      container; tests replace them)
+#   PLAYLIST_IMPORTER, PLAYLIST_SYNCER, PLAYLIST_CHECKER  importer commands (default:
+#                      the downloader container; tests replace them)
 set -Eeuo pipefail
 IFS=$'\n\t'
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
@@ -56,6 +56,18 @@ import_batch() {  # import_batch <id>: one batch; prints the importer's last lin
         "${cmd[@]}" "$1" < "requests/spotify-$1.csv" | tail -n 1
     else
         docker compose --progress quiet run --rm -T downloader --playlist "$1" < "requests/spotify-$1.csv" | tail -n 1
+    fi
+}
+
+check_playlist() {  # check_playlist <id>: the importer's verdict on the CSV, before starting
+    local checker
+    checker="$(setting PLAYLIST_CHECKER)"
+    if [[ -n "$checker" ]]; then
+        IFS=' ' read -r -a cmd <<< "$checker"
+        "${cmd[@]}" < "requests/spotify-$1.csv" | tail -n 1
+    else
+        docker compose --progress quiet run --rm -T downloader --playlist-check \
+            < "requests/spotify-$1.csv" | tail -n 1
     fi
 }
 
@@ -171,7 +183,19 @@ start() {
             "$(awk 'BEGIN { RS = "" } { last = $0 } END { print last }' "requests/spotify-$id.log" 2>/dev/null)"
         return 0
     fi
-    songs=$(( $(grep -c '' "requests/spotify-$id.csv") - 1 ))
+    # Checked here, not in the background, so a file that cannot be read is
+    # reported in this command's answer instead of a message after it.
+    songs="$(python3 -c 'import json, sys
+try:
+    s = json.loads(sys.argv[1])
+except ValueError:
+    s = {}
+print(s["songs"] if s.get("ok") else "error\t%s" % (s.get("reason") or "no answer"))' "$(check_playlist "$id" || true)")"
+    if [[ "$songs" == error* ]]; then
+        printf 'Playlist %s was not started: the file cannot be read (%s). Export it again with Exportify, or send a CSV with track and artist columns.\n' \
+            "$id" "${songs#error$'\t'}" >&2
+        exit 65
+    fi
     # A new session, so the import outlives the agent's or terminal's command.
     nohup python3 -c 'import os, sys
 if os.fork(): sys.exit(0)

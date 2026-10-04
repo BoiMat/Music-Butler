@@ -37,8 +37,12 @@ class PlaylistRunner(unittest.TestCase):
         syncer.write_text(f'#!/bin/sh\ncat > /dev/null\necho "$1|$2" >> "{self.home}/synced"\n'
                           'echo \'{"event": "summary", "ok": true, "playlist": "\'"$2"\'", "songs": 12, "of": 13}\'\n')
         syncer.chmod(0o755)
+        checker = self.home / "checker.sh"  # answers like --playlist-check: one song per CSV line
+        checker.write_text('#!/bin/sh\nn=$(($(grep -c "" ) - 1))\n'
+                           'echo \'{"event": "summary", "ok": true, "songs": \'"$n"\'}\'\n')
+        checker.chmod(0o755)
         self.env = dict(os.environ, PLAYLIST_INBOX=str(self.inbox), PLAYLIST_NOTIFY=str(notify),
-                        PLAYLIST_BUSY_WAIT="0", PLAYLIST_SYNCER=str(syncer))
+                        PLAYLIST_BUSY_WAIT="0", PLAYLIST_SYNCER=str(syncer), PLAYLIST_CHECKER=str(checker))
 
     def script(self, *args, **env):
         return subprocess.run([str(self.home / "scripts" / "playlist.sh"), *args], env={**self.env, **env},
@@ -117,6 +121,21 @@ json.dump(lines, open(path, "w"))
                 break
             time.sleep(0.2)
         self.assertIn("2 of 2 songs in the library, import finished.", self.sent.read_text())
+
+    def test_start_refuses_a_file_the_importer_cannot_read(self):
+        (self.home / "requests" / "spotify-mix.csv").write_text("Foo,Bar\nA,B\n")
+        bad = self.home / "bad.sh"
+        bad.write_text('#!/bin/sh\ncat > /dev/null\necho noise\n'
+                       'echo \'{"event": "error", "code": 65, "reason": "playlist_needs_track_and_artist_columns"}\'\n')
+        bad.chmod(0o755)
+        result = self.script("start", "mix", PLAYLIST_CHECKER=str(bad))
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("Playlist mix was not started: the file cannot be read "
+                      "(playlist_needs_track_and_artist_columns)", result.stderr)
+        self.assertNotIn("Started", result.stdout)
+        time.sleep(0.5)
+        self.assertFalse(self.sent.exists())  # no background run, so no message after the answer
+        self.assertFalse((self.home / "requests" / ".playlist-mix.pid").exists())
 
     def test_bad_ids_and_missing_files(self):
         self.assertEqual(self.script("start", "../x").returncode, 64)

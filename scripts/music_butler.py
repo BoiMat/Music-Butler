@@ -1538,6 +1538,28 @@ def column(header, *names):
     return None
 
 
+def exportify_columns(rows):
+    """Exportify columns found from their values, for headers in any language: each
+    spotify:track/artist/album URI column is followed by its name column."""
+    sample = [r for r in rows[1:101] if any(r)]
+    width = max((len(r) for r in sample), default=0)
+
+    def most(i, test):
+        cells = [r[i].strip() for r in sample if i < len(r) and r[i].strip()]
+        return len(cells) * 2 >= len(sample) > 0 and sum(map(test, cells)) * 2 > len(cells)
+
+    def first(test):
+        return next((i for i in range(width) if most(i, test)), None)
+
+    def after(kind):
+        i = first(lambda c: c.startswith(f"spotify:{kind}:"))
+        return i + 1 if i is not None and i + 1 < width else None
+
+    return {"title": after("track"), "artist": after("artist"), "album": after("album"),
+            "date": first(lambda c: re.fullmatch(r"\d{4}(-\d{2}(-\d{2})?)?", c) is not None),
+            "ms": first(lambda c: c.isdigit() and 10000 <= int(c) <= 3600000)}  # above any year
+
+
 def parse_playlist(raw):
     """Exportify (Spotify) CSV, or any CSV with track and artist columns -> queue entries."""
     import csv
@@ -1548,14 +1570,20 @@ def parse_playlist(raw):
     if len(rows) < 2:
         raise Failure("empty_playlist")
     header = {h.strip().casefold(): i for i, h in enumerate(rows[0])}
-    # Exportify translates its headers to the browser's language: English and Italian here.
-    title_col = column(header, "track name", "track", "title", "song", "name", "nome della traccia", "titolo")
-    artist_col = column(header, "artist name(s)", "artist name", "artists", "artist", "nome dell'artista", "artista")
+    # Exportify translates its headers to the browser's language: known names first,
+    # then columns recognised by their values.
+    found = exportify_columns(rows)
+
+    def pick(key, *names):
+        i = column(header, *names)
+        return found[key] if i is None else i
+    title_col = pick("title", "track name", "track", "title", "song", "name", "nome della traccia", "titolo")
+    artist_col = pick("artist", "artist name(s)", "artist name", "artists", "artist", "nome dell'artista", "artista")
     if title_col is None or artist_col is None:
         raise Failure("playlist_needs_track_and_artist_columns")
-    album_col = column(header, "album name", "album", "nome dell'album")
-    date_col = column(header, "release date", "album release date", "year", "data di rilascio dell'album")
-    ms_col = column(header, "duration (ms)", "duration_ms", "track duration (ms)", "durata della traccia (ms)")
+    album_col = pick("album", "album name", "album", "nome dell'album")
+    date_col = pick("date", "release date", "album release date", "year", "data di rilascio dell'album")
+    ms_col = pick("ms", "duration (ms)", "duration_ms", "track duration (ms)", "durata della traccia (ms)")
     out = []
     for row in rows[1:MAX_QUEUE + 1]:
         def cell(i):
@@ -2128,6 +2156,8 @@ def main():
                       help='Move {"releases": [...]} to the library trash; nothing is deleted')
     mode.add_argument("--playlist", metavar="ID",
                       help="Import the next songs of a playlist CSV from stdin (Exportify); ID names its progress")
+    mode.add_argument("--playlist-check", action="store_true",
+                      help="Check that a playlist CSV on stdin can be read; imports nothing")
     mode.add_argument("--playlist-sync", metavar="ID",
                       help="Create/update the listener's Navidrome playlist from a playlist CSV on stdin")
     parser.add_argument("--name", help="Playlist name for --playlist-sync (default: from the ID)")
@@ -2151,12 +2181,16 @@ def main():
             return missing_lyrics()
         if args.playlists:
             return refresh_playlists()
-        limit = MAX_PLAYLIST if args.queue or args.playlist is not None or args.playlist_sync is not None else MAX_REQUEST
+        limit = (MAX_PLAYLIST if args.queue or args.playlist_check or args.playlist is not None
+                 or args.playlist_sync is not None else MAX_REQUEST)
         raw = sys.stdin.buffer.read(limit + 1)
         if len(raw) > limit:
             raise Failure("request_too_large")
         if args.queue:
             return queue_playlist(raw)
+        if args.playlist_check:
+            emit("summary", ok=True, songs=len(parse_playlist(raw)))
+            return 0
         if args.playlist is not None:
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", args.playlist):
                 raise Failure("invalid_playlist_id", 64)

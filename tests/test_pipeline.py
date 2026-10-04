@@ -604,6 +604,22 @@ class Discovery(unittest.TestCase):
                    '"spotify:artist:2","Various","2019-06-24","287000"\n').encode()
         self.assertEqual(b.parse_playlist(italian)[0], {"artist": "Farruko", "title": "Pepas", "search": "Farruko Pepas",
                                                         "album": "La 167", "year": 2019, "duration": 287})
+        # Exportify in a language we have no names for: columns are found from their values.
+        unknown = ",".join(f"k{n}" for n in range(1, 20)) + "\n" + "\n".join([
+            'spotify:track:1,Pepas,spotify:artist:1,Farruko,spotify:album:1,La 167,spotify:artist:1,Farruko,'
+            '2019,https://i.scdn.co/x,1,3,287000,,false,70,USX,user,2024-05-01T10:00:00Z',
+            'spotify:track:2,Mockingbird,"spotify:artist:2, spotify:artist:3","Tiësto, Gabry Ponte",spotify:album:2,'
+            'Mockingbird,spotify:artist:2,Tiësto,2024-03-01,https://i.scdn.co/y,1,1,155000,,false,60,USY,user,'
+            '2024-05-01T10:00:00Z',
+            'spotify:local:a:b:c:200,Local Song,,Someone,,,,,,,0,0,200000,,false,0,,user,2024-05-01T10:00:00Z',
+        ]) + "\n"
+        rows = b.parse_playlist(unknown.encode())
+        self.assertEqual(rows[0], {"artist": "Farruko", "title": "Pepas", "search": "Farruko Pepas",
+                                   "album": "La 167", "year": 2019, "duration": 287})
+        self.assertEqual((rows[1]["artists"], rows[1]["year"]), (["Tiësto", "Gabry Ponte"], 2024))
+        self.assertEqual((rows[2]["title"], rows[2]["artist"]), ("Local Song", "Someone"))
+        with self.assertRaises(b.Failure):
+            b.parse_playlist(b"k1,k2\nfoo,bar\n")
         for bad in (b"Name\nx\n", b"Track Name,Artist Name(s)\n", b"\xff\xfe"):
             with self.subTest(bad=bad), self.assertRaises((b.Failure, UnicodeError)):
                 b.parse_playlist(bad)
