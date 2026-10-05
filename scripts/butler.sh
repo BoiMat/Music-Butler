@@ -45,10 +45,18 @@ request_file() {
     id="${id#requests/}"
     id="${id#"$1"-}"
     id="${id%."$ext"}"
+    # The error says what to do: small models otherwise guess, e.g. search words as arguments.
+    local usage
+    case "$1" in
+        lookup) usage="Lookup takes one id, not search words: first write $PWD/requests/lookup-<id>.json containing {\"search\": [\"artist title\", ...]}, then run butler.sh lookup <id>." ;;
+        spotify) usage="This command takes the id of $PWD/requests/spotify-<id>.csv; run butler.sh inbox first to pick up files the user sent." ;;
+        *) usage="This command takes one id: first write $PWD/requests/$1-<id>.$ext as the music-butler skill says, then pass <id>." ;;
+    esac
+    usage="$usage The id uses lowercase letters, digits and dashes."
     # No dots or slashes, so an id can never leave requests/.
-    [[ "$id" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'invalid request id: use lowercase letters, digits, dashes' >&2; exit 64; }
+    [[ "$id" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo "invalid request id. $usage" >&2; exit 64; }
     local file="requests/$1-$id.$ext"
-    [[ -f "$file" && ! -L "$file" ]] || { echo "missing $file" >&2; exit 66; }
+    [[ -f "$file" && ! -L "$file" ]] || { echo "missing $PWD/$file. $usage" >&2; exit 66; }
     printf '%s' "$file"
 }
 
