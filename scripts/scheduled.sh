@@ -86,9 +86,12 @@ case "$agent" in
         args=(-p "$profile" chat -Q -t terminal,file,skills -s "$skill")
         [[ -n "$provider" ]] && args+=(--provider "$provider")
         [[ -n "$model" ]] && args+=(-m "$model")
-        out="$("$(setting HERMES_BIN hermes)" "${args[@]}" -q "$task" 2>&1)" || status=$?
-        hermes_home="${HERMES_HOME:-$HOME/.hermes}"
-        [[ "$profile" == default ]] && state="$hermes_home/state.db" || state="$hermes_home/profiles/$profile/state.db"
+        hermes="$(setting HERMES_BIN hermes)"
+        out="$("$hermes" "${args[@]}" -q "$task" 2>&1)" || status=$?
+        # Ask Hermes where the profile lives: under its gateway (cron), HERMES_HOME is
+        # the profile folder itself, so building the path by hand found no state.db.
+        config="$("$hermes" -p "$profile" config path 2>/dev/null | tail -n 1 || true)"
+        state="$(dirname -- "${config:-.}")/state.db"
         # The report is the run's last assistant message in Hermes' session store:
         # filtering the terminal output once dropped a whole report.
         sid="$(printf '%s\n' "$out" | sed -n 's/^session_id: //p' | tail -n 1)"
@@ -103,12 +106,13 @@ print(row[0] if row else "")
 PY
 )"
         fi
-        if [[ -n "$msg" ]]; then
-            printf '%s\n' "$msg"
-        else
-            printf '%s\n' "$out" | grep -v -e '^session_id:' -e 'tirith security scanner' \
-                | awk '/┊ review diff/ { skip = 1; next } skip && /^$/ { skip = 0; next } !skip' || true
-        fi ;;
+        if [[ -z "$msg" ]]; then
+            msg="$(printf '%s\n' "$out" | grep -v -e '^session_id:' -e 'tirith security scanner' \
+                | awk '/┊ review diff/ { skip = 1; next } skip && /^$/ { skip = 0; next } !skip' || true)"
+        fi
+        # Never silent: an empty report would skip delivery without a trace.
+        [[ -n "${msg//[[:space:]]/}" ]] || msg="Music $job run finished, but its report could not be read (Hermes session ${sid:-unknown})."
+        printf '%s\n' "$msg" ;;
     command)
         command="$(setting SCHEDULE_COMMAND)"
         [[ -n "$command" ]] || { echo 'SCHEDULE_COMMAND is not set' >&2; exit 64; }

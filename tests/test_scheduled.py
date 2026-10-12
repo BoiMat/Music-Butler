@@ -60,18 +60,39 @@ class Scheduled(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Music audit run exited with status 1.", result.stdout)
 
-    def test_hermes_report_is_last_assistant_message(self):
-        state_dir = self.tmp / "hermes" / "profiles" / "music-butler"
-        state_dir.mkdir(parents=True)
+    def fake_hermes(self, state_dir, session="s1", printed="noise"):
+        """A hermes that answers `config path` with state_dir and runs a chat as session."""
+        state_dir.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(state_dir / "state.db")
-        db.execute("create table messages (id integer primary key, session_id text, role text, content text)")
+        db.execute("create table if not exists messages (id integer primary key, session_id text, role text, content text)")
         db.executemany("insert into messages (session_id, role, content) values (?, ?, ?)", [
             ("s1", "assistant", "working..."), ("s1", "assistant", "Added 15 songs."),
             ("s1", "assistant", ""), ("s2", "assistant", "other run")])
         db.commit()
         fake = self.tmp / "hermes-bin"
-        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$(dirname "$0")/args"\necho noise\necho "session_id: s1"\n')
+        fake.write_text(f'''#!/bin/sh
+if [ "$3" = config ]; then echo "{state_dir}/config.yaml"; exit 0; fi
+printf "%s\\n" "$*" > "$(dirname "$0")/args"
+echo "{printed}"
+echo "session_id: {session}"
+''')
         fake.chmod(0o755)
+        return fake
+
+    def test_report_found_when_hermes_home_is_the_profile_folder(self):
+        # Hermes' gateway runs cron scripts with HERMES_HOME=<home>/profiles/<profile>.
+        profile_dir = self.tmp / "hermes" / "profiles" / "music-butler"
+        fake = self.fake_hermes(profile_dir, printed="")
+        result = self.run_job("weekly", SCHEDULE_AGENT="hermes", HERMES_BIN=str(fake), HERMES_HOME=str(profile_dir))
+        self.assertEqual(result.stdout, "Added 15 songs.\n", result.stderr)
+
+    def test_hermes_run_without_a_report_is_never_silent(self):
+        fake = self.fake_hermes(self.tmp / "hermes" / "profiles" / "music-butler", session="gone", printed="")
+        result = self.run_job("audit", SCHEDULE_AGENT="hermes", HERMES_BIN=str(fake))
+        self.assertEqual(result.stdout, "Music audit run finished, but its report could not be read (Hermes session gone).\n")
+
+    def test_hermes_report_is_last_assistant_message(self):
+        fake = self.fake_hermes(self.tmp / "hermes" / "profiles" / "music-butler")
         result = self.run_job("weekly", SCHEDULE_AGENT="hermes", HERMES_BIN=str(fake),
                               SCHEDULE_PROVIDER="prov", SCHEDULE_MODEL="small", SCHEDULE_MODEL_WEEKLY="big")
         self.assertEqual(result.stdout, "Added 15 songs.\n", result.stderr)
