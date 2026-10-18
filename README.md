@@ -13,14 +13,16 @@ Codex, [Hermes](https://hermes-agent.nousresearch.com) over Telegram...). The ag
 narrow command, [`scripts/butler.sh`](scripts/butler.sh). It never gets a shell
 or Docker.
 
-| The weekly playlist, on the phone | What the agent picked, and why |
-| --- | --- |
-| [<img src="docs/screenshots/home-discover-weekly.jpg" width="260" alt="Tempo home screen with a Discover Weekly playlist">](docs/screenshots/home-discover-weekly.jpg) | [<img src="docs/screenshots/weekly-reports.png" width="260" alt="Telegram reports: a weekly library audit and a weekly discovery list with reasons">](docs/screenshots/weekly-reports.png) |
+| Ask for eight songs in one message | They are on your phone a minute later | Every week, a report and new music |
+| --- | --- | --- |
+| [<img src="docs/screenshots/chat-request.png" width="240" alt="Chat: a request for eight songs, and the agent confirming each one was added">](docs/screenshots/chat-request.png) | [<img src="docs/screenshots/home-discover-weekly.jpg" width="240" alt="Tempo home screen with a Discover Weekly playlist">](docs/screenshots/home-discover-weekly.jpg) | [<img src="docs/screenshots/weekly-reports.png" width="240" alt="Telegram reports: a weekly library audit and a weekly discovery list with reasons">](docs/screenshots/weekly-reports.png) |
 
-The weekly reports arrive in chat: the audit says what it fixed and what it left
-alone, and discovery explains every pick ("because you like ..."). The songs are
-waiting in *Discover Weekly* ([playlist](docs/screenshots/discover-weekly-playlist.jpg))
-by the time you read it.
+Misspell the artists, run the titles together, mix languages: the names are
+resolved against YouTube Music release data. The weekly reports explain
+themselves — the audit says what it fixed and what it deliberately left alone,
+and discovery justifies every pick ("because you like ..."), with the songs
+already waiting in *Discover Weekly*
+([playlist](docs/screenshots/discover-weekly-playlist.jpg)).
 
 ```text
 you: "add Get Lucky by Daft Punk and Mr. Brightside"
