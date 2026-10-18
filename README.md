@@ -6,13 +6,21 @@ library while you listen: it imports your Spotify playlists, then adds a weekly
 batch of songs picked from what you star and play, and removes what you skip.
 
 Music Butler connects [Navidrome](https://www.navidrome.org) (server),
-[Tempo](https://github.com/CappielloAntonio/tempo) (Android player) and an AI
+an Android player ([Tempo](https://github.com/CappielloAntonio/tempo), or its
+actively maintained fork [Tempus](https://github.com/eddyizm/tempus)) and an AI
 agent you already use (a local [Ollama](https://ollama.com) model, Claude Code,
 Codex, [Hermes](https://hermes-agent.nousresearch.com) over Telegram...). The agent gets one
 narrow command, [`scripts/butler.sh`](scripts/butler.sh). It never gets a shell
 or Docker.
 
-<!-- Screenshots: docs/screenshots/ (Tempo with "Discover Weekly", a chat request, a weekly report). -->
+| The weekly playlist, on the phone | What the agent picked, and why |
+| --- | --- |
+| [<img src="docs/screenshots/home-discover-weekly.jpg" width="260" alt="Tempo home screen with a Discover Weekly playlist">](docs/screenshots/home-discover-weekly.jpg) | [<img src="docs/screenshots/weekly-reports.png" width="260" alt="Telegram reports: a weekly library audit and a weekly discovery list with reasons">](docs/screenshots/weekly-reports.png) |
+
+The weekly reports arrive in chat: the audit says what it fixed and what it left
+alone, and discovery explains every pick ("because you like ..."). The songs are
+waiting in *Discover Weekly* ([playlist](docs/screenshots/discover-weekly-playlist.jpg))
+by the time you read it.
 
 ```text
 you: "add Get Lucky by Daft Punk and Mr. Brightside"
@@ -73,7 +81,8 @@ Navidrome only listens on `127.0.0.1`. To reach it from your phone, use a VPN or
 a TLS reverse proxy. With [Tailscale](https://tailscale.com),
 `tailscale serve --bg 4533` gives a tailnet-only HTTPS URL. Enable HTTPS
 certificates in the Tailscale admin console first. In
-[Tempo](https://github.com/CappielloAntonio/tempo/releases), add that URL and
+[Tempus](https://github.com/eddyizm/tempus/releases) (or
+[Tempo](https://github.com/CappielloAntonio/tempo/releases)), add that URL and
 the non-admin account. Any Subsonic client works.
 
 **3. Add songs**
@@ -174,6 +183,13 @@ better than the weekly picks. A mid-size hosted model works well for `weekly`.
 - **Privacy.** Navidrome sends artist names to Deezer for artist pictures
   (`DEEZER_ENABLED=false` turns that off), and lyrics lookups go to LRCLIB when
   `LRCLIB_USER_AGENT` is set.
+- **A known player bug, not a server one.** Tempo and Tempus can stall on a
+  stream (about 10 s of buffering, 2–3 s of audio, for minutes) when the
+  connection degrades: the app keeps the dying connection instead of
+  re-requesting, so only skipping the track recovers it. Measured end to end and
+  reported upstream in
+  [tempus#1224](https://github.com/eddyizm/tempus/issues/1224). If it happens,
+  skip the song; for commutes, download the playlist for offline use.
 - **Backups.** `scripts/backup.sh` makes encrypted restic snapshots to a USB
   drive or any repository. See [backups](docs/REFERENCE.md#backups).
 - **A second instance** (another person, same machine): clone the repo again and
