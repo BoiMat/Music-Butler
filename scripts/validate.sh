@@ -6,7 +6,10 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 if [[ -x .venv/bin/python ]]; then
     export PATH="$PWD/.venv/bin:$PATH"
 fi
-bash -n scripts/download_music.sh scripts/setup.sh scripts/validate.sh
+# `bash -n a b` parses only `a` (b becomes $1), so check each script separately.
+for script in scripts/*.sh; do
+    bash -n "$script"
+done
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck scripts/*.sh
 else

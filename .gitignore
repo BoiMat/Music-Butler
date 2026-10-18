@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 .DS_Store
 *.log
+
+# Private debugging journal (home network details); not for the public repo.
+STUTTER-INVESTIGATION.md

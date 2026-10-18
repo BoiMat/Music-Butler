@@ -1,158 +1,216 @@
-# Music Butler Stack
+# Music Butler
 
-A private, self-hosted music library: **Navidrome → Tempo (Android)**, with an
-optional, constrained download tool for your **existing Hermes Agent**.
-Only import audio you are authorized to download, or verified public-domain
-recordings. A Spotify subscription or a search result is **not** authorization.
+Ask for a song by name and it shows up in your own music server: tagged, with
+cover art and synced lyrics, ready to play on your phone. It also grows the
+library while you listen: it imports your Spotify playlists, then adds a weekly
+batch of songs picked from what you star and play, and removes what you skip.
 
-## Start
+Music Butler connects [Navidrome](https://www.navidrome.org) (server),
+an Android player ([Tempo](https://github.com/CappielloAntonio/tempo), or its
+actively maintained fork [Tempus](https://github.com/eddyizm/tempus)) and an AI
+agent you already use (a local [Ollama](https://ollama.com) model, Claude Code,
+Codex, [Hermes](https://hermes-agent.nousresearch.com) over Telegram...). The agent gets one
+narrow command, [`scripts/butler.sh`](scripts/butler.sh). It never gets a shell
+or Docker.
 
-Requirements: Docker Engine/Desktop with Compose v2+, Bash and Python 3 on the
-host, and writable local storage. Linux is recommended; Docker Desktop on macOS
-is supported for development. Clone this repository, enter its directory, then:
+| Ask for eight songs in one message | They are on your phone a minute later | Every week, a report and new music |
+| --- | --- | --- |
+| [<img src="docs/screenshots/chat-request.png" width="240" alt="Chat: a request for eight songs, and the agent confirming each one was added">](docs/screenshots/chat-request.png) | [<img src="docs/screenshots/home-discover-weekly.jpg" width="240" alt="Tempo home screen with a Discover Weekly playlist">](docs/screenshots/home-discover-weekly.jpg) | [<img src="docs/screenshots/weekly-reports.png" width="240" alt="Telegram reports: a weekly library audit and a weekly discovery list with reasons">](docs/screenshots/weekly-reports.png) |
 
-```sh
-./scripts/setup.sh --start
-```
-
-This generates `.env` with your UID/GID, provisions bind directories, validates
-Compose, and runs `docker compose up -d`. No root/sudo or bundled secrets.
-For custom disks, copy `.env.example` to `.env`, set paths and numeric IDs first;
-run `./scripts/setup.sh`, then `docker compose up -d`.
-
-Open **http://localhost:4533** immediately and create the first admin account.
-Keep the default loopback binding until onboarding is complete. Use a VPN or a
-TLS reverse proxy for your phone; `localhost` on Android is the phone, not the
-server. With Tailscale, `tailscale serve --bg 4533` gives a tailnet-only HTTPS URL
-while Navidrome stays on loopback (enable HTTPS certificates in the Tailscale admin
-console first). Create a **non-admin** playback account for Tempo.
-
-## Import an approved song or album
-
-```sh
-docker compose --profile tools build downloader
-mkdir -p requests
-cp config/request.example.json requests/approved.json
-# Edit every placeholder: accurate metadata, exact authorized audio URLs,
-# per-track permission/license evidence. Never execute the example unchanged.
-docker compose run --rm -T downloader --validate < requests/approved.json
-docker compose run --rm -T downloader < requests/approved.json
-```
-
-For an album, set `kind` to `album` and list **each authorized track in order**.
-No artist-wide crawling, automatic search-to-download, playlist expansion, or
-Spotify audio extraction. MP3 quality is `128|192|256|320`; FLAC compression is
-`0`–`8` (strings). Lossy-to-FLAC conversion cannot restore quality.
-
-Set `LRCLIB_USER_AGENT` in `.env` to your application name/version and **real
-contact email or project URL** to enable synchronized lyrics. Blank disables
-lookups. Optional `artwork_url` per track supplies an authorized image. Missing
-artwork or synced lyrics does not prevent import.
-
-Success emits a JSON `complete` event with files, hashes, lyrics/artwork status
-and scan status. The **whole album** appears atomically in the library.
-Navidrome's watcher plus a one-minute schedule arranges discovery without
-credentials. Optional admin `startScan` is described in the blueprint; a scan
-request is **not** a guarantee that the library is already indexed.
-
-## AI agent skill and Tempo
-
-[`skills/music-butler/SKILL.md`](skills/music-butler/SKILL.md) is a standard
-agent skill (`SKILL.md` with `name`/`description` front matter) for imports,
-library status and backups. Its commands are relative to this checkout; copy or
-symlink the folder into your agent's skills directory and replace `REPO` with the
-checkout path if the agent does not run from it. Typical locations (check your
-agent's docs): Claude Code `~/.claude/skills/`, Codex `~/.codex/skills/`, GitHub
-Copilot `.github/skills/`, Hermes `~/.hermes/skills/<category>/`.
-
-- Agents run only [`scripts/butler.sh`](scripts/butler.sh), which accepts a request
-  id or a drive name, never free text. Request data is a JSON file.
-- Configure your agent's command approval so it may write
-  `requests/approved-*.json` and run `scripts/butler.sh` and nothing broader. The
-  skill text guides the model; it is **not** an OS security boundary. An agent with
-  unrestricted terminal access keeps those powers, and anyone who can message it
-  can ask for imports.
-- Optional `hermes` profile starts an **execution sandbox**, not an agent or
-  messaging gateway: `docker compose --profile hermes up -d hermes-exec`.
-  See the [security boundary](BLUEPRINT.md#hermes-boundary).
-- Install [Tempo](https://github.com/CappielloAntonio/tempo/releases), add your
-  reachable HTTPS/VPN Navidrome URL and playback credentials, refresh the library,
-  play a song and open the lyrics panel. Synced lyrics highlight lines when the
-  server's OpenSubsonic lyrics extension and matching LRC are available.
-
-## Repository map
+Misspell the artists, run the titles together, mix languages: the names are
+resolved against YouTube Music release data. The weekly reports explain
+themselves — the audit says what it fixed and what it deliberately left alone,
+and discovery justifies every pick ("because you like ..."), with the songs
+already waiting in *Discover Weekly*
+([playlist](docs/screenshots/discover-weekly-playlist.jpg)).
 
 ```text
-.
-├── README.md / BLUEPRINT.md / LICENSE
-├── compose.yaml / .env.example / .gitignore / .dockerignore
-├── requirements.in / requirements.lock
-├── config/
-│   └── request.example.json
-├── skills/music-butler/SKILL.md     # agent skill (any SKILL.md-aware agent)
-├── docker/Dockerfile
-├── scripts/
-│   ├── butler.sh                    # fixed agent entry point
-│   ├── backup.sh                    # encrypted restic backups
-│   ├── setup.sh
-│   ├── validate.sh
-│   ├── download_music.sh
-│   └── music_butler.py
-├── tests/
-│   ├── test_pipeline.py
-│   ├── test_config.py
-│   └── container_smoke.py
-├── docs/VALIDATION.md
-└── storage/                         # ignored, created at setup
-    ├── navidrome/                   # SQLite, cache, settings
-    └── library/
-        ├── .staging/                # NOT mounted into Navidrome
-        ├── logs/                    # private per-request audit receipts
-        └── music/Artist--Album--ID/ # audio + same-name LRC + provenance
+you: "add Get Lucky by Daft Punk and Mr. Brightside"
+ └─ agent ─ butler.sh lookup ─▶ YouTube Music search (yt-dlp, in a container)
+          └ butler.sh add ────▶ download ▶ tag ▶ cover ▶ LRCLIB lyrics ▶ library
+                                                            │
+                         Tempo on your phone ◀── Navidrome ◀┘
 ```
 
-## Backups
+## What it does
 
-`scripts/backup.sh` makes an encrypted [restic](https://restic.net) snapshot of
-the library (audio, lyrics, provenance, receipts), a consistent Navidrome
-database copy (`navidrome backup create`), `.env`, `secrets/` and `requests/`.
-It keeps 7 daily, 4 weekly and 12 monthly snapshots and verifies a sample of
-the repository after each run. If `BACKUP_REPOSITORY` points at an unmounted
-drive, the run is skipped.
+- **Add songs by name**, one or many at a time, in chat. Names, album and year
+  come from YouTube Music release data. Duplicates and near-duplicate artist
+  spellings are caught before anything downloads.
+- **Clean files**: ID3v2.4 / FLAC tags (including multi-artist), square cover
+  art, time-synced `.lrc` lyrics. Each album appears in the library all at once.
+- **Whole playlists at once**: send a Spotify playlist (exported with
+  [Exportify](https://exportify.app)) to the bot. It imports every song in the
+  background and reports every 20 songs. Each song is matched to YouTube Music
+  by artist, title and length, and anything uncertain is listed instead of guessed.
+  At the end the playlist appears in Tempo under its own name.
+- **Taste**: a few artists and a few words ("Italian pop, no trap") steer
+  discovery until your own likes and ratings take over.
+- **Weekly discovery**: new songs from the YouTube Music radios of songs you
+  liked or rated highly, at least 5 by artists new to you, in a
+  *Discover Weekly* playlist. Giving a song 1★ is the only way it leaves the
+  library; nothing is removed by age or play count.
+- **Weekly audit**: a stronger model checks tags and covers and fixes what it is
+  sure about, and lyrics are retried for songs that had none (LRCLIB grows).
+- **Safe defaults**: hardened containers (read-only, no capabilities, non-root),
+  Navidrome on loopback only, a download host allowlist, every import logged
+  with hashes, and encrypted [restic](https://restic.net) backups.
+
+## Quickstart
+
+You need Docker with Compose v2, Bash and Python 3. Linux is the main target;
+macOS with Docker Desktop works too.
+
+**1. Start the server**
 
 ```sh
-brew install restic
-security add-generic-password -a music-butler -s music-butler-restic \
-  -l 'Music Butler restic backup' -T /usr/bin/security -w "$(openssl rand -base64 32)"
-# Set BACKUP_REPOSITORY in .env, then:
-./scripts/backup.sh init
-./scripts/backup.sh            # back up now
-./scripts/backup.sh restore-test
+git clone https://github.com/BoiMat/Music-Butler.git
+cd Music-Butler
+./scripts/setup.sh --start                       # writes .env, creates storage/, starts Navidrome
+docker compose --profile tools build downloader  # the download/tag container
 ```
 
-**Copy the password into a password manager**
-(`security find-generic-password -a music-butler -s music-butler-restic -w`).
-Without it the backup cannot be decrypted, so losing the Mac would also lose the backup.
-On Linux, set `RESTIC_PASSWORD_FILE` instead of using the Keychain.
+Open **http://localhost:4533** and create the admin account. Then create a
+second, **non-admin** account to listen with.
 
-To restore: `restic restore latest --target /tmp/restore`, copy the library and
-`.env`/`secrets` back, then with Navidrome stopped run
-`docker compose run --rm navidrome /app/navidrome backup restore --backup-file /data/backup/<file>.db`.
+For synced lyrics, set `LRCLIB_USER_AGENT` in `.env` to an app name plus your
+contact email or project URL, e.g. `music-butler/1.0 (you@example.com)`, as
+[LRCLIB](https://lrclib.net) asks. While it is blank, lyrics lookups are off.
 
-## Operate and validate
+**2. Connect your phone**
+
+Navidrome only listens on `127.0.0.1`. To reach it from your phone, use a VPN or
+a TLS reverse proxy. With [Tailscale](https://tailscale.com),
+`tailscale serve --bg 4533` gives a tailnet-only HTTPS URL. Enable HTTPS
+certificates in the Tailscale admin console first. In
+[Tempus](https://github.com/eddyizm/tempus/releases) (or
+[Tempo](https://github.com/CappielloAntonio/tempo/releases)), add that URL and
+the non-admin account. Any Subsonic client works.
+
+**3. Add songs**
+
+The easiest agent is the bundled local one: no API key, no account.
 
 ```sh
-docker compose ps
-docker compose logs --since 10m navidrome
-bash -n scripts/download_music.sh
-# Host tests: Python 3.12, ffmpeg, locked dependencies (see validation guide).
-./scripts/validate.sh
-docker compose --env-file .env.example --profile tools --profile hermes config --quiet
+ollama pull qwen2.5:7b
+python3 scripts/agent.py
+> add Get Lucky by Daft Punk and The Entertainer by Scott Joplin
 ```
 
-[BLUEPRINT.md](BLUEPRINT.md) covers the exact request contract, upstream evidence,
-permissions, secrets, recovery, backups, legal constraints and limitations.
-[docs/VALIDATION.md](docs/VALIDATION.md) records **what was actually tested**.
-The bundle is MIT-licensed; upstream software and imported content retain their
-own licenses. This is not Spotify, a streaming subscription, or an entitlement
-to download copyrighted recordings.
+Already use an agent? Give it the skills in [`skills/`](skills/):
+`music-butler` (add songs), `music-audit` and `music-discover`. See
+[agent setup](docs/REFERENCE.md#ai-agent-skill-and-tempo) for Claude Code,
+Codex, Copilot and Hermes. You can also
+[write a request file by hand](docs/REFERENCE.md#import-approved-songs-and-albums).
+
+**4. Teach it your taste (optional)**
+
+```sh
+# Listening account, so discovery learns from your stars, ratings and plays:
+#   .env: NAVIDROME_LISTENER_USER=<your non-admin user>
+#   secrets/navidrome_listener_password (chmod 600)
+./scripts/butler.sh playlist liked    # import requests/spotify-liked.csv (an Exportify export) now
+./scripts/butler.sh seeds start       # requests/seeds-start.json: {"artists": [...], "notes": "..."}
+```
+
+A playlist import runs in the background, 20 songs at a time, and reports after
+each batch to `requests/spotify-<id>.log`. To get the reports in your chat, and
+to send playlists to the bot as files, set in `.env`:
+
+```sh
+PLAYLIST_NOTIFY=hermes -p music-butler send --to telegram --quiet   # any command reading stdin
+PLAYLIST_INBOX=/home/you/.hermes/profiles/music-butler/cache/documents  # where Hermes saves files
+```
+
+Then schedule the runs below. Details of the
+[discovery rules](docs/REFERENCE.md#taste-bootstrap-and-weekly-discovery).
+
+## Scheduled runs
+
+[`scripts/scheduled.sh`](scripts/scheduled.sh) runs an agent for one job and
+prints its report:
+
+| Job | Suggested schedule | What it does |
+| --- | --- | --- |
+| `bootstrap` | daily | adds up to 25 songs (playlist queue first) until the library holds `BOOTSTRAP_TARGET` songs and the queue is empty, then reports once and stays silent |
+| `weekly` | weekly | removes songs you rated 1★, adds 15 new songs |
+| `audit` | weekly | retries missing lyrics, fixes certain tag, cover and duplicate problems, reports the rest |
+
+Choose the agent in `.env`:
+
+- **Any agent CLI** that reads the task on stdin and prints its answer:
+  ```sh
+  SCHEDULE_AGENT=command
+  SCHEDULE_COMMAND=claude -p --allowedTools Bash(scripts/butler.sh:*),Bash(./scripts/butler.sh:*),Read,Edit(requests/**)
+  ```
+  Then add to your crontab (`crontab -e`). The report goes wherever you send
+  stdout (a log, `mail`, a webhook):
+  ```cron
+  0 8 * * *  /path/to/Music-Butler/scripts/scheduled.sh bootstrap >> ~/music-butler.log 2>&1
+  0 10 * * 0 /path/to/Music-Butler/scripts/scheduled.sh audit     >> ~/music-butler.log 2>&1
+  0 11 * * 0 /path/to/Music-Butler/scripts/scheduled.sh weekly    >> ~/music-butler.log 2>&1
+  ```
+- **Hermes** (reports arrive in Telegram or another chat):
+  ```sh
+  SCHEDULE_AGENT=hermes
+  HERMES_PROFILE=music-butler
+  SCHEDULE_PROVIDER=          # blank = the profile's default provider/model
+  SCHEDULE_MODEL=
+  SCHEDULE_MODEL_WEEKLY=      # optional stronger model for taste decisions
+  ```
+  `./scripts/install_hermes_skill.sh` installs the skills and the cron scripts
+  `music-discover-bootstrap.sh`, `music-audit.sh` and `music-discover.sh` into the
+  profile. Then:
+  ```sh
+  hermes -p music-butler cron create '0 8 * * *'  --name music-discover-bootstrap --script music-discover-bootstrap.sh --no-agent --deliver telegram --workdir "$PWD"
+  hermes -p music-butler cron create '0 10 * * 0' --name music-library-audit      --script music-audit.sh              --no-agent --deliver telegram --workdir "$PWD"
+  hermes -p music-butler cron create '0 11 * * 0' --name music-discover-weekly    --script music-discover.sh           --no-agent --deliver telegram --workdir "$PWD"
+  ```
+  Set `cron.script_timeout_seconds: 3600` in the profile's `config.yaml`, because
+  a run imports songs for several minutes.
+
+Discovery needs judgment, so a small local model does the playlist bootstrap
+better than the weekly picks. A mid-size hosted model works well for `weekly`.
+
+## Good to know
+
+- **Sources.** Songs come from YouTube (Music) and the Internet Archive through
+  [yt-dlp](https://github.com/yt-dlp/yt-dlp), only from explicit URLs and only
+  from hosts in `DOWNLOAD_ALLOWED_HOSTS`. Whether you may download a given
+  recording depends on where you live and on the source's terms: that is your
+  call. This is a personal library tool, not a sharing service.
+- **The agent is not a security boundary.** The skills tell it to run only
+  `butler.sh`. Restrict it with your agent's own command approval. Anyone who can
+  message your agent can ask for imports.
+- **Privacy.** Navidrome sends artist names to Deezer for artist pictures
+  (`DEEZER_ENABLED=false` turns that off), and lyrics lookups go to LRCLIB when
+  `LRCLIB_USER_AGENT` is set.
+- **A known player bug, not a server one.** Tempo and Tempus can stall on a
+  stream (about 10 s of buffering, 2–3 s of audio, for minutes) when the
+  connection degrades: the app keeps the dying connection instead of
+  re-requesting, so only skipping the track recovers it. Measured end to end and
+  reported upstream in
+  [tempus#1224](https://github.com/eddyizm/tempus/issues/1224). If it happens,
+  skip the song; for commutes, download the playlist for offline use.
+- **Backups.** `scripts/backup.sh` makes encrypted restic snapshots to a USB
+  drive or any repository. See [backups](docs/REFERENCE.md#backups).
+- **A second instance** (another person, same machine): clone the repo again and
+  give its `.env` its own `COMPOSE_PROJECT_NAME`, `TOOLS_IMAGE` and
+  `NAVIDROME_PORT` **before** the first `docker compose up`; otherwise it takes
+  over the first instance's containers or image. Then a separate agent profile,
+  installed from that clone.
+
+## Documentation
+
+- [docs/REFERENCE.md](docs/REFERENCE.md): request format, tagging, fix-ups
+  (`library`, `retag`, `remove`), discovery rules, agent setup, backups, repo map.
+- [BLUEPRINT.md](BLUEPRINT.md): design, security boundary, upstream evidence,
+  recovery and limitations.
+- [docs/VALIDATION.md](docs/VALIDATION.md): what was actually tested.
+
+Tests: `./scripts/validate.sh` (host) and the container suite described in
+the validation guide.
+
+## License
+
+MIT. Upstream software and imported content keep their own licenses.

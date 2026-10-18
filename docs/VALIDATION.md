@@ -18,7 +18,7 @@ were made to the upstream main checkout. No push or production deployment.
 | `docker compose --env-file .env.example --profile tools --profile hermes config --quiet` | exit 0; all profiles and example validated |
 | `./scripts/setup.sh` (without `--start`) | exit 0; generated ignored `.env`, provisioned this worktree's storage/secrets directories, printed “Configuration valid; storage provisioned” |
 | `docker compose config --quiet` using generated `.env` | exit 0 |
-| yt-dlp and spotDL `--help`, plus actual installed argument parsers in tests | accepted bundled flags; official Spotify API flag and empty lyrics provider list asserted |
+| yt-dlp `--help`, plus the actual installed argument parser in tests | accepted bundled flags asserted |
 | `uv pip compile ... --generate-hashes` | resolved **63 packages**, wrote exact/hash-locked transitive requirements |
 | Tooling Docker build, including `pip --require-hashes` | succeeded, `Image music-butler-tools:local Built` |
 | `python3 tests/container_smoke.py` | exit 0; **21 tests run in container, 20 passed, 1 intentionally skipped**, 4.675 s; Navidrome smoke passed |
@@ -61,14 +61,13 @@ See BLUEPRINT for source URLs rather than relying on an invented `/api/scan`.
 ### What the offline tests exercise
 
 - Valid single-song/album schema; invalid enums, unknown keys, invalid URLs,
-  credential-like URLs, controls, private DNS, missing rights assertion.
+  credential-like URLs, controls, private DNS.
 - Quoted/no-shell argument construction, Unicode/path traversal slugging,
   actual Bash stdin forwarding and malformed JSON exit 65.
 - Real media subprocess creation and SIGTERM cancellation/reaping.
-- Cancellation propagation through otherwise non-fatal artwork/lyrics/scan and
-  spotDL fallback paths; early rejection of unsupported host Python versions.
-- Installed yt-dlp/spotDL argument parsers; spotDL official API configuration,
-  missing-secret refusal and same-approved-URL fallback (no API access).
+- Cancellation propagation through otherwise non-fatal artwork/lyrics/scan
+  paths; early rejection of unsupported host Python versions.
+- Installed yt-dlp argument parser (bundled flags, no API access).
 - Generated two-second sine waves → **real FFmpeg MP3 and FLAC**, real Mutagen
   metadata/cover embedding, final audio hash verification.
 - Generated image → real FFmpeg JPEG normalization → MP3 APIC / FLAC PICTURE.
@@ -94,14 +93,8 @@ low-space test; the real importer retains its 2 GiB minimum-free-space check.
   guard because its tiny fixture library was in a 128 MiB tmpfs. The test fixture
   now mocks available capacity (and separately tests rejection), rather than
   weakening production checks. The final container run passed.
-- SpotDL 4.5.2 defaults to an unofficial client; inspection led to forcing the
-  official API and requiring operator credentials. No default embedded secret
-  or unofficial authentication flow is used.
 - Direct audio URLs can lack extractor duration metadata: the yt-dlp filter now
   permits unknown duration, with actual decoded duration checked before publish.
-- A third-party `PendingDeprecationWarning` from Starlette's `multipart` import
-  occurs when loading spotDL argument definitions. Tests pass; no web service
-  is started. This is not a dependency security audit.
 - Two combined terminal invocations were held for approval by the runner's
   command guard (chmod-plus-execution, and a multi-command Docker invocation).
   No user was present; they were not approved or relied upon as test results.
@@ -142,6 +135,168 @@ Each has a regression assertion in `tests/test_config.py` or `tests/test_pipelin
 | Backups | `scripts/backup.sh` against a temporary restic repository: backup, prune, `restic check`, and `restore-test` with all audio hashes identical; Navidrome `backup create` copy passed SQLite `integrity_check` |
 | Tests | 21 host tests pass, ShellCheck clean on all scripts |
 
+## Review fixes (2026-09-29) — NOT yet executed
+
+A code review found, and this revision changes, the following. They were
+written on a Windows machine that cannot run the stack, so **none of this has
+been run yet**. Rerun `scripts/validate.sh` and the container smoke test before
+relying on it.
+
+- The counts above ("21 tests") no longer match the repository: the suite at
+  review time had 20 test methods (a rights-assertion test described earlier no
+  longer existed). This revision adds `tests/test_agent.py` and two importer tests.
+- `scripts/agent.py`: added a `butler_write_request` tool (the model previously
+  had no way to write request files), argument checking so a bad tool call can't
+  crash the loop, no agent-side timeout for imports/backups, and process-group
+  termination on timeout/Ctrl+C. Ollama HTTP errors are reported by cause, and
+  `write-request` now goes straight to the model.
+- Artwork: `archive.org/download` URLs redirect to `*.archive.org` mirrors,
+  which the no-redirect client always refused. Artwork fetches now follow up to 3
+  redirects to allowlisted hosts, re-checking policy and public DNS for each hop.
+- `DOWNLOAD_ALLOWED_HOSTS` entries are stripped and lowercased.
+- `scripts/validate.sh` checked only the first script with `bash -n`; it now
+  checks each one.
+- `scripts/butler.sh` finds drives on Linux (`/run/media/$USER`, `/media`);
+  `scripts/backup.sh` skips missing optional paths, handles a never-started
+  Navidrome, restores only `music/` for `restore-test` after a free-space check,
+  and falls back to `sha256sum` when there is no `shasum`.
+- README restore command corrected to `docker compose run --rm navidrome backup restore ...`.
+
+## Small-model / multi-song changes (2026-09-29) — partially executed
+
+Goal: the skill and `scripts/agent.py` work with a ~8 B local model and with
+several songs in one message.
+
+- New request shape `{"songs": [...]}` (grouped into releases by the importer),
+  sequential batch import ending in one `summary` line, `butler.sh add <id>`
+  (validate then import), readable request ids `[a-z0-9-]{1,64}`.
+- Agent: one `butler_add` tool (flat song list), compact results (summary or
+  errors only), `num_ctx` 16384, temperature 0.2. SKILL.md rewritten as short
+  imperative steps around the one file + one command flow.
+- Cover fallback: yt-dlp `--write-thumbnail`, centre-square crop → `source_thumbnail`.
+- LRCLIB: strict `/api/search` fallback after a 404 from `/api/get`.
+- Default allowlist adds `m.youtube.com`, `music.youtube.com`. An existing
+  `.env` keeps its own `DOWNLOAD_ALLOWED_HOSTS` until edited.
+
+Actually run, on Windows 11 with Python 3.12, FFmpeg on PATH, and mutagen 1.48.1 +
+yt-dlp 2026.8.19 in a venv. POSIX-only calls were stubbed (`flock`, `killpg`,
+`O_NOFOLLOW`, directory fsync), so **locking, signals and fsync were not tested**:
+
+- 23 of the importer tests passed, including real FFmpeg MP3/FLAC encodes, real
+  thumbnail crop to 180×180 from a 320×180 image, thumbnail embedding in an
+  ingest, batch continue/stop logic, songs grouping and per-song errors, the
+  strict lyrics fallback, and the real yt-dlp parser accepting the new flags.
+- 4 agent tests passed (the process-group test needs POSIX and was skipped).
+- `bash -n` on every script.
+
+Not run: the bash-script CLI tests, ShellCheck, Docker/Compose, a real YouTube
+download (whether `-x` keeps the written thumbnail is taken from yt-dlp's
+documented behaviour, not observed), live LRCLIB search, and any real small model.
+
+## Lookup and title cleaning (2026-09-29) — partially executed
+
+- `--lookup` / `butler.sh lookup <id>` / agent `butler_lookup`: YouTube search
+  (`ytsearch5:`) and link inspection, whitelisted output fields only, with
+  YouTube Music "Topic" results enriched with clean `artist`/`track`.
+- SKILL.md: lookup → pick (Topic > official audio > lyric video, avoid
+  videos/live/extended) → clean titles (drop video labels, keep feat./remix/live/
+  remaster) → add. Songs asked for one by one get no `album`.
+
+Actually run on Windows (same setup and stubs as above): 28 importer tests and
+5 agent tests pass (1 POSIX-only skip), including the real yt-dlp parser on the
+lookup flags and `capture()` against a real child process. A **live
+metadata-only lookup** also ran (nothing downloaded) for "Daft Punk Get Lucky"
+and "Scott Joplin The Entertainer". It returned 5 real candidates each; the
+"Scott Joplin - Topic" result came back enriched with `artist: Scott Joplin`,
+`track: The Entertainer`. Windows needed `SYSTEMROOT` added to the child
+environment for sockets. The Linux container does not; this was injected only
+in the test harness.
+
+Not run: lookup inside the container, and a real small model choosing results
+and cleaning titles.
+
+## Taste bootstrap and weekly discovery (2026-09-30) — executed
+
+- 58 tests pass in `music-butler-tools:local` (`--init`; 1 POSIX skip): the 46
+  earlier ones plus radio parsing and noise filter, scoring/caps/near-duplicates,
+  seed selection, Exportify CSV parsing, seeds validation, Navidrome play-count
+  matching and stale selection, origin tags, bulk-add skip, and a full
+  seeds -> queue -> discover -> remove -> discover cycle with mocked yt-dlp/Navidrome.
+- Live `butler.sh discover` on the 5-song library: Navidrome listening read
+  (`search3` reports fake paths, so songs are matched on album + title +
+  duration), 5 YouTube Music radios (`RDAMVM<id>`), 40 ranked candidates in ~8 s.
+- Navidrome 0.64.1 imported both `.nsp` smart playlists from the music folder
+  with the default settings. After an import they listed exactly the songs
+  tagged `music-butler:discovery`.
+- One live `music-discover` run on gpt-6-luna (3-song test): it read discover,
+  looked the songs up, wrote one approved request with `"origin": "discovery"`,
+  added Zara Larsson, Hozier and Taylor Swift songs (synced lyrics), and wrote
+  the report.
+- Not yet seen: a Spotify CSV import live, a scheduled bootstrap/weekly cron
+  run, and pruning of a real stale discovery (needs 4 weeks).
+
+## Scheduled runner (2026-10-02) — partially executed
+
+- `scripts/scheduled.sh` replaces the per-machine Hermes cron scripts;
+  `install_hermes_skill.sh` now writes thin wrappers into the profile.
+- `tests/test_scheduled.py` (6 tests: prompts, bootstrap completion once,
+  queued-playlist continuation, failure report, Hermes report from a fake
+  `state.db`, unconfigured agent). Full suite in `music-butler-tools:local`:
+  66 tests, OK (1 skipped).
+- `claude -p --allowedTools ...` from the README example: `scripts/butler.sh status`
+  and `./scripts/butler.sh status` ran, and a write to `requests/` was allowed.
+  `Write(path)` rules are ignored by Claude Code; `Edit(path)` is required. One run
+  called `bash scripts/butler.sh`, which the example rules do not match.
+- Not yet seen: a Hermes cron job through the new wrappers.
+
+## Fresh-clone quickstart (2026-10-02) — executed on macOS
+
+Cloned `feat/local-ollama-agent` from GitHub into an empty directory and
+followed only the README, as compose project `mbfresh` on port 4599 next to the
+live stack.
+
+- `./scripts/setup.sh` wrote `.env`, created `storage/` and `secrets/` (<1 s);
+  `docker compose up -d` brought Navidrome up healthy; the admin and a non-admin
+  listener were created through Navidrome's API instead of the web form.
+- `docker compose --profile tools build downloader` built cleanly.
+- `python3 scripts/agent.py` (host Python 3.9.6, `OLLAMA_MODEL=gemma4:latest`
+  instead of `qwen2.5:7b`): "add The Entertainer by Scott Joplin" → one lookup,
+  the YouTube Music "Topic" release chosen, imported with cover. Lyrics were
+  `disabled` because `LRCLIB_USER_AGENT` was blank; the quickstart now says to set it.
+- Step 4: `queue` (1-line CSV), `seeds`, `discover` with
+  `NAVIDROME_LISTENER_USER=listener` → `listening: ok`, 34 candidates.
+- `scripts/scheduled.sh bootstrap` with `SCHEDULE_AGENT=command` and the README's
+  `claude -p --allowedTools ...` line: 7 min 48 s, 16 songs added (playlist,
+  seed artist, discoveries; off-taste candidates skipped), report on stdout, no
+  permission denials. 3 YouTube Music releases failed with `media_tool_failed`;
+  the agent re-imported them from the artists' official channel videos (one is a
+  longer music-video edit).
+- Not tested: a Linux host, a phone connection to this test instance.
+
+## Whole-playlist import (2026-10-04) — executed
+
+- `butler.sh playlist random` (50-song Exportify CSV, 15 already in the library)
+  on the live deployment, with `PLAYLIST_NOTIFY` = `hermes send` to Telegram:
+  the command returned at once; the import ran detached (own session) and
+  finished in about 10 minutes: 2 batches, 34 added, 0 failed, 1 "no certain
+  match" (Men At Work - Down Under). Two reports were sent, no send failures.
+- Spot checks: "Overkill - Acoustic Version" matched the acoustic release;
+  "Turn The Lights Off - Radio Edit" (179 s) matched YouTube Music's "(Album
+  Version)" at the same length.
+- A CSV sent to the bot on Telegram ("disney.csv", 13 songs): gemma ran `inbox`
+  and `playlist disney`; the import finished in ~4 minutes, 13 of 13 added,
+  report delivered to the chat. Gemma sent a second, redundant reply promising
+  an update; the skill now says the reports reach the user directly.
+- The three remaining saved playlists, one after another (liked 58,
+  hit-estive-italiane 119, best-hits-2026 143): about 40 minutes; library 372
+  songs. 2 downloads failed with YouTube's "HTTP Error 403: Forbidden" (now
+  visible in the report thanks to the error detail), 10 songs had no certain
+  match (e.g. Dua Lipa - Don't Start Now, Jennifer Lopez - On The Floor).
+- The Tempo playlist sync ran for best-hits-2026: "Best Hits 2026" with 136
+  songs in Spotify order, owned by the listening account (then deleted: the
+  owner keeps these songs as one shuffled library).
+- Not yet seen: an import waiting for a busy library outside the tests.
+
 ## Reproduce
 
 Local (Python 3.12 recommended, importer requires at least 3.11; host FFmpeg required):
@@ -169,7 +324,7 @@ project, publish ports, download music or contact chat/model services.
 
 ## Not tested / still required
 
-- spotDL with live Spotify API credentials, and YouTube sources.
+- YouTube sources.
 - An album (multi-track) import against a live source; albums are covered only by
   the offline tests.
 - Synced lyrics shown in Tempo for an imported song (none of the imported

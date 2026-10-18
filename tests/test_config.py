@@ -12,7 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 @unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI not installed")
 class ComposeConfig(unittest.TestCase):
     def test_profiles_mounts_security_and_example(self):
-        env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
+        keys = ("PATH", "HOME", "USERPROFILE", "APPDATA", "SYSTEMROOT", "TMP", "TEMP")
+        if os.name == "nt":
+            # Windows docker.exe resolves CLI plugins (compose, buildx) from paths
+            # built on standard Windows environment variables.
+            keys += ("PROGRAMFILES", "PROGRAMW6432")
+        env = {key: os.environ[key] for key in keys if key in os.environ}
         # macOS CLT python3 exports these compiler paths; they must never become bind mounts.
         env.update(LIBRARY_PATH="/usr/local/lib", CPATH="/usr/local/include")
         cmd = ["docker", "compose", "--env-file", ".env.example", "--profile", "tools", "--profile", "hermes", "config", "--format", "json"]
@@ -38,7 +43,7 @@ class ComposeConfig(unittest.TestCase):
         self.assertTrue(mounts["/music"]["read_only"])
         self.assertNotIn("/library", mounts)
         self.assertEqual(services["downloader"]["profiles"], ["tools"])
-        self.assertEqual(services["downloader"]["environment"]["ENABLE_SPOTDL"], "false")
+        self.assertNotIn("ENABLE_SPOTDL", services["downloader"]["environment"])
         self.assertEqual(services["hermes-exec"]["profiles"], ["hermes"])
         self.assertNotIn("ports", services["downloader"])
 
