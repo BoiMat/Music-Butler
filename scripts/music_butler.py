@@ -35,7 +35,14 @@ DEFAULT_HOSTS = ("archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,y
                  "m.youtube.com,music.youtube.com")
 YOUTUBE_HOSTS = {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
 MAX_SONGS = 100
-SONG_KEYS = {"artist", "title", "url", "album", "artists", "year", "artwork_url", "origin"}
+SONG_KEYS = {"artist", "title", "url", "file", "album", "artists", "year", "artwork_url", "origin"}
+# Names a small model writes when it does not know the real ones: never tag a song with them.
+PLACEHOLDERS = {"artistname", "songname", "songtitle", "trackname", "tracktitle", "albumname", "unknown",
+                "unknownartist", "unknowntitle", "unknownalbum", "placeholder"}
+# Audio files the user sent (e.g. to the bot on Telegram), found by name in UPLOAD_DIR.
+UPLOAD_SUFFIXES = (".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav")
+UPLOAD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ ()-]{0,199}")
+MAX_UPLOAD = 524288000
 # Why a release was added: asked for, from a playlist export, from a taste seed, or discovered.
 ORIGINS = ("request", "playlist", "seed", "discovery")
 # Batch imports continue past these per-release failures; anything else stops the batch.
@@ -148,10 +155,49 @@ def display_artist(artists):
     return artists[0] if len(artists) == 1 else ", ".join(artists[:-1]) + " & " + artists[-1]
 
 
+def real_name(value, name):
+    """text(), refusing placeholders such as "Artist Name" / "Song Name"."""
+    value = text(value, name)
+    if norm(value) in PLACEHOLDERS:
+        raise Failure("placeholder_" + name)
+    return value
+
+
+def upload_dir():
+    return Path(os.environ.get("UPLOAD_DIR", "/uploads"))
+
+
+def upload(value, resolve=False):
+    """An uploaded audio file's name -> the name. A full path is reduced to its name: the
+    file is only ever looked for in UPLOAD_DIR and its direct subfolders."""
+    value = text(value, "file", 1024).rsplit("/", 1)[-1]
+    if not UPLOAD_NAME.fullmatch(value) or ".." in value or not value.lower().endswith(UPLOAD_SUFFIXES):
+        raise Failure("invalid_file")
+    if resolve:
+        upload_path(value)
+    return value
+
+
+def upload_path(name):
+    root = upload_dir()
+    if not root.is_dir() or root.is_symlink():
+        raise Failure("uploads_not_configured", 69)
+    found = [p for p in [root / name, *(d / name for d in sorted(root.iterdir()) if d.is_dir() and not d.is_symlink())]
+             if p.is_file() and not p.is_symlink()]
+    if not found:
+        raise Failure("file_not_found")
+    if len(found) > 1:
+        raise Failure("ambiguous_file")
+    if found[0].stat().st_size > MAX_UPLOAD:
+        raise Failure("file_too_large")
+    return found[0]
+
+
 def validate_songs(data, resolve=False):
     """Flat song list, the easy format for agents:
-    {"songs": [{artist, title, url, album?, artists?, year?, artwork_url?}]}.
+    {"songs": [{artist, title, url | file, album?, artists?, year?, artwork_url?}]}.
 
+    `file` is an audio file the user sent, by name (see upload()), instead of a `url`.
     Songs that share artist and album become one album release, in list order.
     A song without an album is its own single, named after the song.
     """
@@ -168,13 +214,19 @@ def validate_songs(data, resolve=False):
         try:
             if not isinstance(song, dict) or set(song) - SONG_KEYS:
                 raise Failure("invalid_song_keys")
-            artist = text(song.get("artist"), "artist")
-            title = text(song.get("title"), "title")
-            album = None if blank(song.get("album")) else text(song.get("album"), "album")
-            t = {"title": title, "url": url(song.get("url"), hosts, resolve), "song": n}
-            if t["url"] in seen:
+            artist = real_name(song.get("artist"), "artist")
+            title = real_name(song.get("title"), "title")
+            album = None if blank(song.get("album")) else real_name(song.get("album"), "album")
+            if blank(song.get("url")) == blank(song.get("file")):
+                raise Failure("url_or_file_required")
+            if blank(song.get("file")):
+                t = {"title": title, "url": url(song.get("url"), hosts, resolve), "song": n}
+            else:
+                t = {"title": title, "file": upload(song["file"], resolve), "song": n}
+            source = t.get("url") or "file:" + t["file"]
+            if source in seen:
                 raise Failure("duplicate_source_url")
-            seen.add(t["url"])
+            seen.add(source)
             if not blank(song.get("artwork_url")):
                 t["artwork_url"] = url(song["artwork_url"], hosts, resolve)
             if song.get("artists") not in (None, []):
@@ -321,20 +373,62 @@ def download_agent():
 
 
 DOWNLOAD_RETRY_PAUSE = 20  # seconds; YouTube refuses some downloads during a burst of imports
+# "Sign in to confirm you're not a bot": YouTube blocks the whole address for minutes
+# (2026-10-25: every download for over 5 minutes, after two in a row). One long pause,
+# then the batch stops and the rest waits for a later retry (see defer()).
+BOT_CHECK = re.compile(r"confirm you.re not a bot", re.I)
+BOT_CHECK_PAUSE = 300
+DOWNLOAD_SPACING = 15  # seconds between YouTube downloads, so a batch is not a burst
+last_download = float("-inf")
+
+
+def bot_check(exc):
+    return str(exc) == "media_tool_failed" and bool(BOT_CHECK.search(exc.detail or ""))
 
 
 def acquire(track, request, work, env):
+    if "file" in track:
+        return from_upload(track, work, env)
+    global last_download
+    if urllib.parse.urlsplit(track["url"]).hostname in YOUTUBE_HOSTS:
+        wait = last_download + DOWNLOAD_SPACING - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
     try:
         return download(track, work, env)
     except Failure as exc:
         if str(exc) != "media_tool_failed":
             raise
-        emit("warning", reason="download_retry", title=track["title"], detail=exc.detail)
-        time.sleep(DOWNLOAD_RETRY_PAUSE)
+        blocked = bot_check(exc)
+        emit("warning", reason="youtube_bot_check_pause" if blocked else "download_retry",
+             title=track["title"], detail=exc.detail)
+        time.sleep(BOT_CHECK_PAUSE if blocked else DOWNLOAD_RETRY_PAUSE)
         for leftover in work.iterdir():
             if leftover.is_file() and not leftover.is_symlink():
                 leftover.unlink()
-        return download(track, work, env)
+        try:
+            return download(track, work, env)
+        except Failure as again:
+            if bot_check(again):
+                raise Failure("youtube_bot_check", 75, detail=again.detail) from again
+            raise
+    finally:
+        last_download = time.monotonic()
+
+
+def from_upload(track, work, env):
+    """An audio file the user sent: decoded like a download, its embedded picture (if
+    any) saved where source_thumbnail() finds a download's thumbnail."""
+    path = upload_path(track["file"])
+    source = work / "source.flac"
+    run(["ffmpeg", "-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file,pipe", "-i", str(path),
+         "-map", "0:a:0", "-vn", "-map_metadata", "-1", "-c:a", "flac", str(source)], work, env)
+    with contextlib.suppress(Failure):  # most files have no picture
+        run(["ffmpeg", "-nostdin", "-v", "error", "-n", "-protocol_whitelist", "file,pipe", "-i", str(path),
+             "-map", "0:v:0", "-frames:v", "1", str(work / "thumb.jpg")], work, env)
+    if not source.is_file() or source.is_symlink():
+        raise Failure("no_audio_output", 69)
+    return source, "upload"
 
 
 def download(track, work, env):
@@ -439,26 +533,29 @@ def description_year(description):
 
 
 def validate_lookup(data, resolve=False):
-    """{"search": ["artist title", ...], "urls": [...]} -> normalized lookup request."""
-    if not isinstance(data, dict) or set(data) - {"search", "urls"}:
+    """{"search": ["artist - title", ...], "urls": [...], "files": [...]} -> normalized lookup request."""
+    if not isinstance(data, dict) or set(data) - {"search", "urls", "files"}:
         raise Failure("invalid_lookup_keys")
-    searches, urls = data.get("search", []), data.get("urls", [])
+    searches, urls, files = data.get("search", []), data.get("urls", []), data.get("files", [])
     searches = [searches] if isinstance(searches, str) else searches
     urls = [urls] if isinstance(urls, str) else urls
-    if (not isinstance(searches, list) or not isinstance(urls, list)
-            or not 1 <= len(searches) + len(urls) <= MAX_LOOKUPS):
+    files = [files] if isinstance(files, str) else files
+    if (not isinstance(searches, list) or not isinstance(urls, list) or not isinstance(files, list)
+            or not 1 <= len(searches) + len(urls) + len(files) <= MAX_LOOKUPS):
         raise Failure("invalid_lookup_count")
     hosts = allowed_hosts()
     # Search results are returned as www.youtube.com links, which must be importable.
     if searches and "www.youtube.com" not in hosts:
         raise Failure("youtube_search_not_allowed")
-    out = {"search": [], "urls": []}
-    for n, item in enumerate([*searches, *urls], 1):
+    out = {"search": [], "urls": [], "files": []}
+    for n, item in enumerate([*searches, *urls, *files], 1):
         try:
             if n <= len(searches):
                 out["search"].append(text(item, "search", 200))
-            else:
+            elif n <= len(searches) + len(urls):
                 out["urls"].append(url(item, hosts, resolve))
+            else:
+                out["files"].append(upload(item, resolve))
         except Failure as exc:
             exc.item = n
             raise
@@ -494,6 +591,10 @@ def video_summary(entry, given_url=None):
     song = release_song(entry)
     summary["names"] = "release" if song else "guessed"
     song = song or guess_song(summary["title"])
+    if song and not song.get("artist") and clean_channel(summary["channel"]):
+        # "All I do Is Win The Musical" names no artist: the uploader is the best guess, and
+        # a guess the agent can show beats the "Artist Name" it would otherwise invent.
+        song = {"artist": clip(clean_channel(summary["channel"])), **song}
     if song:
         summary["song"] = song
     return summary
@@ -536,8 +637,107 @@ def youtube_music(q, cwd, env):
     return music
 
 
+MUSICBRAINZ_PAUSES = (1.1, 3, 10)  # ≤1 request/s per their policy; 503 = over the limit, retried
+musicbrainz_last = float("-inf")
+
+
+def plain_title(value):
+    """"Song (feat. X)" -> "Song": MusicBrainz puts guests in the artist credit."""
+    return BARE_FEAT.sub("", BRACKETED_FEAT.sub("", value or "")).strip()
+
+
+def lucene(value):
+    return '"' + re.sub(r'(["\\])', r"\\\1", value) + '"'
+
+
+def musicbrainz(artist, title):
+    """The recording on MusicBrainz: performers only (labels' songwriter credits are not
+    in it) and the year it first came out, earliest of all its releases. None when
+    MusicBrainz is not configured (no user agent); {"match": "none"} when not found."""
+    global musicbrainz_last
+    agent = os.environ.get("MUSICBRAINZ_USER_AGENT") or os.environ.get("LRCLIB_USER_AGENT")
+    if not agent or not artist or not plain_title(title):
+        return None
+    address = "https://musicbrainz.org/ws/2/recording?" + urllib.parse.urlencode(
+        {"query": f"recording:{lucene(plain_title(title))} AND artist:{lucene(main_artist(artist))}",
+         "fmt": "json", "limit": "25"})
+    for pause in MUSICBRAINZ_PAUSES:
+        wait = musicbrainz_last + pause - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            body = json.loads(fetch(address, headers={"User-Agent": agent, "Accept": "application/json"}))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code != 503 or pause == MUSICBRAINZ_PAUSES[-1]:
+                raise
+        finally:
+            musicbrainz_last = time.monotonic()
+    want_title, want_artist = norm(plain_title(title)), norm(main_artist(artist))
+    matches = []
+    for r in body.get("recordings") or []:
+        if not isinstance(r, dict) or not isinstance(r.get("artist-credit"), list):
+            continue
+        credits = [clip(c.get("name")) for c in r["artist-credit"] if isinstance(c, dict)]
+        date = r.get("first-release-date") if isinstance(r.get("first-release-date"), str) else ""
+        if (r.get("score", 0) >= 90 and norm(r.get("title")) == want_title and want_artist in map(norm, credits)
+                and re.match(r"\d{4}", date)):
+            matches.append((date, [c for c in credits if c][:20], clip(r.get("title"))))
+    if not matches:
+        return {"match": "none"}
+    date, artists, found = min(matches)
+    return {"match": "found", "title": found, "artists": artists, "year": int(date[:4])}
+
+
+def checked(artist, title):
+    """musicbrainz() for a lookup entry: {} when off, {"musicbrainz": ...} otherwise."""
+    result = guarded(lambda: musicbrainz(artist, title), "lookup_failed")
+    return {} if result is None else {"musicbrainz": result.get("error") or result}
+
+
+def names_for(query, results):
+    """Artist and title of a search: "Artist - Title", else the first result whose names
+    are both in the search text (e.g. "Dua Lipa Don't Start Now"), else (None, None)."""
+    parts = re.split(r"\s+[-–—]\s+", query, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[0].strip(), parts[1].strip()
+    for r in results:
+        song = r.get("song") or {}
+        if (song.get("artist") and song.get("title") and norm(main_artist(song["artist"])) in norm(query)
+                and norm(plain_title(song["title"])) in norm(query)):
+            return main_artist(song["artist"]), song["title"]
+    return None, None
+
+
+def file_summary(name):
+    """An uploaded file's own tags and length, for the agent to copy like a song."""
+    import mutagen
+    path = upload_path(name)
+    try:
+        audio = mutagen.File(path, easy=True)
+    except mutagen.MutagenError:
+        audio = None
+    if audio is None or not getattr(audio, "info", None):
+        return {"file": name, "error": "not_audio"}
+    tags = audio.tags or {}
+
+    def first(key):
+        values = tags.get(key) or [None]
+        return clip(values[0] if isinstance(values, list) else values)
+    out = {"file": name, "duration": round(audio.info.length)}
+    song = {k: first(k) for k in ("artist", "title", "album") if first(k)}
+    year = re.match(r"\d{4}", first("date") or "")
+    if year and 1000 <= int(year.group()) <= 2100:
+        song["year"] = int(year.group())
+    out["names"] = "file_tags" if song.get("artist") and song.get("title") else "missing"
+    if song:
+        out["song"] = song
+    return out
+
+
 def lookup(query):
-    """Search YouTube and/or read metadata for URLs. Nothing is downloaded or written."""
+    """Search YouTube and/or read metadata for URLs and uploaded files; check the names on
+    MusicBrainz. Nothing is downloaded or written."""
     with tempfile.TemporaryDirectory(prefix="lookup-") as tmp:
         env = {"PATH": os.environ["PATH"], "HOME": tmp, "XDG_CONFIG_HOME": tmp,
                "XDG_CACHE_HOME": tmp, "TMPDIR": tmp, "LANG": "C.UTF-8"}
@@ -552,14 +752,22 @@ def lookup(query):
             topic = [r for r in videos if (r["channel"] or "").endswith(" - Topic")][:ENRICH_PER_SEARCH]
             for r in topic:
                 enrich(r, tmp, env)
-            return {"query": q, "results": music + videos}
+            return {"query": q, "results": music + videos, **checked(*names_for(q, music + videos))}
 
         def one_url(link):
-            return video_summary(details(link, tmp, env), given_url=link) or {"url": link, "error": "not_importable"}
+            found = video_summary(details(link, tmp, env), given_url=link)
+            if not found:
+                return {"url": link, "error": "not_importable"}
+            return {**found, **checked((found.get("song") or {}).get("artist"), (found.get("song") or {}).get("title"))}
+
+        def one_file(name):
+            found = file_summary(name)
+            return {**found, **checked((found.get("song") or {}).get("artist"), (found.get("song") or {}).get("title"))}
 
         searches = [{"query": q, **guarded(lambda: search(q), "search_failed")} for q in query["search"]]
         urls = [{"url": u, **guarded(lambda: one_url(u), "lookup_failed")} for u in query["urls"]]
-    emit("lookup", search=searches, urls=urls)
+        files = [{"file": f, **guarded(lambda: one_file(f), "lookup_failed")} for f in query.get("files", [])]
+    emit("lookup", search=searches, urls=urls, **({"files": files} if files else {}))
 
 
 ID3_FRAMES = {"title": "TIT2", "artist": "TPE1", "albumartist": "TPE2", "album": "TALB",
@@ -1027,7 +1235,8 @@ def read_release(folder):
         added = receipt.get("created")
         origin = receipt["request"].get("origin") if receipt["request"].get("origin") in ORIGINS else "request"
         for source, done in zip(receipt["request"]["tracks"], receipt["tracks"]):
-            urls[done["file"]] = source["url"]
+            if source.get("url"):
+                urls[done["file"]] = source["url"]
     tracks = []
     for n, path in enumerate(audio_files(folder), 1):
         try:
@@ -1073,13 +1282,13 @@ def library_index(existing):
     return idx
 
 
-def check_library(releases):
+def check_library(releases, refuse=True):
     """Match names already in the library and refuse songs that are already there.
 
     Same name apart from case/punctuation/accents: the library's spelling is used.
     A close but different name is only reported, as a note on the release.
-    Bulk adds (origin other than "request") skip a song already there instead of
-    refusing the whole request; the skipped songs are returned.
+    Bulk adds (origin other than "request") and refuse=False skip a song already there
+    instead of refusing the whole request; the skipped songs are returned.
     """
     try:
         idx = library_index(read_library())
@@ -1102,8 +1311,8 @@ def check_library(releases):
             release["album"] = album
         kept = []
         for n, track in enumerate(release["tracks"], 1):
-            if (key, norm(track["title"])) in idx["songs"] or video_id(track["url"]) in idx["videos"]:
-                if release.get("origin", "request") == "request":
+            if (key, norm(track["title"])) in idx["songs"] or video_id(track.get("url")) in idx["videos"]:
+                if refuse and release.get("origin", "request") == "request":
                     exc = Failure("already_in_library")
                     exc.item = track.get("song", n)
                     raise exc
@@ -1296,8 +1505,12 @@ def remove(ids):
     return 0 if not failed else 65
 
 
+LYRICS_BATCH = 40  # songs per `butler.sh lyrics`: a few minutes, inside an agent's command timeout
+
+
 def missing_lyrics():
-    """Retry LRCLIB, with the import's strict match, for every track without an .lrc.
+    """Retry LRCLIB, with the import's strict match, for tracks without an .lrc: the
+    LYRICS_BATCH checked longest ago, so repeated runs go round the whole library.
 
     Lyrics are often added to LRCLIB after a song is imported, and a failed lookup
     used to be final. Nothing is downloaded but lyrics; tags are not touched.
@@ -1312,7 +1525,19 @@ def missing_lyrics():
     with library_lock(root):
         todo = [(folder, path) for folder in release_dirs(music) for path in audio_files(folder)
                 if not path.with_suffix(".lrc").exists()]
+        checked_path = root / "lyrics-checked.json"
+        try:
+            checked_at = json.loads(checked_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            checked_at = {}
+        checked_at = checked_at if isinstance(checked_at, dict) else {}
+        def key(item):
+            return item[0].name + "/" + item[1].name
+        todo.sort(key=lambda item: str(checked_at.get(key(item), "")))  # never checked first
+        remaining = max(0, len(todo) - LYRICS_BATCH)
+        todo = todo[:LYRICS_BATCH]
         for i, (folder, path) in enumerate(todo):
+            checked_at[key((folder, path))] = now().isoformat()
             release = RELEASE_DIR.search(folder.name).group(1)
             try:
                 tags = read_tags(path)
@@ -1339,10 +1564,13 @@ def missing_lyrics():
             if status == "rate_limited":
                 not_attempted = [{"release": RELEASE_DIR.search(f.name).group(1), "file": p.name}
                                  for f, p in todo[i + 1:]]
+                checked_at.pop(key((folder, path)))  # not really checked: first again next time
                 break
+        with contextlib.suppress(OSError):
+            write_json(checked_path, checked_at)
     scan_status = scan() if found else "not_needed"
     emit("summary", ok=not not_attempted, found=found, missing=missing,
-         not_attempted=not_attempted, scan=scan_status)
+         not_attempted=not_attempted, remaining=remaining, scan=scan_status)
     return 0 if not not_attempted else 69
 
 
@@ -2094,10 +2322,63 @@ def import_all(releases, skipped=()):
     Exit 0 only if every release was added. Invalid/unavailable sources (65/69) skip
     to the next release; storage, lock, interrupt or internal errors stop the batch.
     """
-    added, failed, not_attempted, first_code, _ = import_releases(releases)
+    added, failed, not_attempted, first_code, outcomes = import_releases(releases)
+    later = []
+    if any(f["reason"] == "youtube_bot_check" for f in failed):
+        # The release that hit the bot check and everything after it wait for retry().
+        failures = iter(failed)
+        for release, outcome in zip(releases, outcomes):
+            if outcome == "not_attempted" or (outcome == "failed" and next(failures)["reason"] == "youtube_bot_check"):
+                later.append(release)
+        try:
+            defer(later)
+            failed, not_attempted = [f for f in failed if f["reason"] != "youtube_bot_check"], []
+        except (Failure, OSError):  # e.g. the library is busy: report them as not added instead
+            later = []
     emit("summary", ok=not failed and not not_attempted and not first_code,
-         added=added, failed=failed, not_attempted=not_attempted, **({"skipped": list(skipped)} if skipped else {}))
+         added=added, failed=failed, not_attempted=not_attempted, **({"skipped": list(skipped)} if skipped else {}),
+         **({"deferred": [describe(r) for r in later], "retry": "automatic"} if later else {}))
     return first_code
+
+
+def release_songs(release):
+    """A validated release back as request songs (the "songs" format)."""
+    songs = []
+    for t in release["tracks"]:
+        song = {"artist": release["artist"], "title": t["title"], "album": release["album"],
+                "origin": release.get("origin", "request")}
+        song.update({k: t[k] for k in ("url", "file", "artists", "year", "artwork_url") if k in t})
+        songs.append(song)
+    return songs
+
+
+def defer(releases):
+    """Keep releases YouTube refused (bot check) for retry(), without duplicates."""
+    root = library_root()
+    with library_lock(root):
+        songs = read_state(root, "deferred.json", {}).get("songs", [])
+        known = {s.get("url") or s.get("file") for s in songs if isinstance(s, dict)}
+        for release in releases:
+            songs += [s for s in release_songs(release) if (s.get("url") or s.get("file")) not in known]
+        write_json(discovery_path(root, "deferred.json"), {"songs": songs})
+
+
+def retry():
+    """Import the songs defer() kept. Songs still blocked are deferred again."""
+    root = library_root()
+    with library_lock(root):
+        songs = [s for s in read_state(root, "deferred.json", {}).get("songs", []) if isinstance(s, dict)]
+        write_json(discovery_path(root, "deferred.json"), {"songs": []})
+    valid, skipped = [], []
+    for song in songs:  # one bad song (e.g. a file since deleted) must not hold up the others
+        try:
+            parse({"songs": [song]}, resolve=True)
+            valid.append(song)
+        except Failure as exc:
+            skipped.append({"artist": song.get("artist"), "title": song.get("title"), "reason": str(exc)})
+    releases = parse({"songs": valid}, resolve=True) if valid else []
+    skipped += check_library(releases, refuse=False)
+    return import_all(releases, skipped)
 
 
 def import_releases(releases):
@@ -2169,6 +2450,8 @@ def main():
                       help="List songs to add: playlist queue, radio candidates, 1-star songs to remove; reads no stdin")
     mode.add_argument("--seeds", action="store_true", help='Merge taste seeds {"artists": [...], "songs": [...], "notes": ...}')
     mode.add_argument("--queue", action="store_true", help="Queue the songs of a playlist CSV (Exportify) for import")
+    mode.add_argument("--retry", action="store_true",
+                      help="Import the songs YouTube's bot check held back; reads no stdin")
     args = parser.parse_args()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, interrupted)
@@ -2181,6 +2464,8 @@ def main():
             return missing_lyrics()
         if args.playlists:
             return refresh_playlists()
+        if args.retry:
+            return retry()
         limit = (MAX_PLAYLIST if args.queue or args.playlist_check or args.playlist is not None
                  or args.playlist_sync is not None else MAX_REQUEST)
         raw = sys.stdin.buffer.read(limit + 1)

@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole Spotify playlist (CSV), or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported, or asks for a music backup.
+description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole Spotify playlist (CSV), or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported, or asks for a music backup.
 ---
 
 # Music Butler
@@ -10,7 +10,7 @@ The only command you run is `REPO/scripts/butler.sh`. It never takes search
 words: every command takes the id of a file you write first.
 
 To add songs, ALWAYS these 4 steps, all songs of the message together:
-1. Write a lookup file `REPO/requests/lookup-<id>.json`: `{"search": ["artist title", ...]}`
+1. Write a lookup file `REPO/requests/lookup-<id>.json`: `{"search": ["Artist - Title", ...]}`
 2. Run `REPO/scripts/butler.sh lookup <id>` and pick one result per song.
 3. Write a request file `REPO/requests/approved-<id>.json` with the picked songs.
 4. Run `REPO/scripts/butler.sh add <id>` once, then report.
@@ -20,13 +20,16 @@ letters, digits and dashes, e.g. `djo-2`. Use a new id every time.
 
 ## Step 1: Look up
 
-One search text per song, `artist title`. Add links the user gave as `"urls"`:
+One search text per song, `Artist - Title` (with ` - `). A link the user
+gave goes in `"urls"` (no search for it). An audio file the user sent goes in
+`"files"`: its file name, e.g. `audio_063dae991426.mp3`:
 
 ```json
-{"search": ["Daft Punk Get Lucky", "Scott Joplin The Entertainer"], "urls": ["https://..."]}
+{"search": ["Daft Punk - Get Lucky", "Scott Joplin - The Entertainer"],
+ "urls": ["https://..."], "files": ["audio_063dae991426.mp3"]}
 ```
 
-For an album, search each track (`artist track title`). Not sure of the track
+For an album, search each track (`Artist - Track title`). Not sure of the track
 list? Ask first. Run `REPO/scripts/butler.sh lookup <id>`; it downloads nothing.
 Its last line lists `results` per search:
 
@@ -37,6 +40,13 @@ Its last line lists `results` per search:
  "song": {"artist": "HUNTR/X", "title": "Golden", "album": "Golden", "year": 2025,
           "artists": ["HUNTR/X", "EJAE", "AUDREY NUNA", "REI AMI", "KPop Demon Hunters Cast"]}}
 ```
+
+Each search, url and file can also have `"musicbrainz"`, the music database:
+`{"match": "found", "title": ..., "artists": [...], "year": 2019}`. Its
+`artists` are the performers only and `year` is when the song first came out.
+
+`urls` and `files` give one result each, with `song`. A file's `song` comes
+from its own tags.
 
 A search with `"error"` or no good result: search once more with just artist
 and title. Still nothing: ask the user for a link.
@@ -65,6 +75,8 @@ match. Otherwise continue.
 
 For each song copy the picked `url` and its `song` (`artist`, `title`, and
 `album`, `year`, `artists` when present) EXACTLY: same spelling and capitals.
+With `"musicbrainz": {"match": "found"}`, take `year` and `artists` from it
+instead. For a sent file, write `"file": "<file name>"` instead of `url`.
 Write it with your file tool to `REPO/requests/approved-<id>.json`:
 
 ```json
@@ -73,12 +85,17 @@ Write it with your file tool to `REPO/requests/approved-<id>.json`:
    "artists": ["HUNTR/X", "EJAE", "AUDREY NUNA", "REI AMI", "KPop Demon Hunters Cast"],
    "url": "https://www.youtube.com/watch?v=9_bTl2vvYQg"},
   {"artist": "Scott Joplin", "title": "The Entertainer",
-   "url": "https://archive.org/download/ITEM/entertainer.flac"}
+   "url": "https://archive.org/download/ITEM/entertainer.flac"},
+  {"artist": "skeletalhypnagogia380", "title": "Rise, Player!", "file": "audio_063dae991426.mp3"}
 ]}
 ```
 
-Only with `"names": "guessed"`, fix the `song`: no `artist` = use the one the
-user named; remove `(Official Audio)`, `(Official Video)`, `(Lyrics)`,
+Never write made-up names such as `Artist Name` or `Song Name`: they are
+refused (`placeholder_artist`). No names at all (a file without tags): ask
+the user.
+
+Only with `"names": "guessed"`, fix the `song`: the user named the artist =
+use theirs (a guessed `artist` can be the uploader's channel); remove `(Official Audio)`, `(Official Video)`, `(Lyrics)`,
 `(Lyric Video)`, `(Audio)`, `(Visualizer)`, `[HD]`, `[4K]` and anything after
 ` | `; keep `(feat. X)`, `Remix`, `Live`, `Acoustic`, `Remastered`, `Radio Edit`.
 
@@ -93,6 +110,9 @@ and can take many minutes: wait, run nothing else. Report from its LAST line.
 - `added`: now in the library. Say "added" only for these. Never add them again.
 - `failed`: NOT added; tell the `reason`. `busy_retry_later`: wait a minute, retry.
 - `not_attempted`: NOT added, the run stopped early.
+- `deferred`: YouTube blocked downloads for now. They are NOT added yet but are
+  retried on their own in the background; the user gets a message. Never add
+  them again yourself.
 - To retry, write a NEW file with only the failed and not attempted songs.
 - `"warning": "published_check_before_retry"`: it IS added; the operator should check it.
 - `notes`: `artist_spelling_from_library` / `album_spelling_from_library` = the
@@ -106,6 +126,7 @@ and can take many minutes: wait, run nothing else. Report from its LAST line.
 - `already_in_library` with `"song": N`: tell the user, write a new file without
   song N, run `add` again.
 - other `"song": N`: song N is wrong (`reason`). Fix it in a new file, run `add` again.
+- `file_not_found`: use the sent file's name exactly, e.g. `audio_063dae991426.mp3`.
 - `Invalid id` / `Missing ...`: do what the message says.
 
 ## Taste (for weekly discovery)

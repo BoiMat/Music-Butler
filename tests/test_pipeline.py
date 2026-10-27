@@ -263,7 +263,7 @@ class NetworkMocks(unittest.TestCase):
 
     def test_validate_lookup(self):
         self.assertEqual(b.validate_lookup({"search": "Daft Punk Get Lucky"}),
-                         {"search": ["Daft Punk Get Lucky"], "urls": []})
+                         {"search": ["Daft Punk Get Lucky"], "urls": [], "files": []})
         self.assertEqual(b.validate_lookup({"urls": ["https://youtu.be/abc"]})["urls"], ["https://youtu.be/abc"])
         for bad, item in [({"search": ["ok", "x\ny"]}, 2), ({"search": ["ok"], "urls": ["https://evil.test/a"]}, 2),
                           ({"search": [""]}, 1)]:
@@ -1047,7 +1047,7 @@ class DownloadFailures(unittest.TestCase):
                     raise result
                 return result
             with patch.object(b, "download", side_effect=fake_download), patch.object(b.time, "sleep") as sleep, \
-                    contextlib.redirect_stdout(io.StringIO()) as output:
+                    patch.object(b, "last_download", float("-inf")), contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(b.acquire(track, {}, work, {}), (work / "source.flac", "yt-dlp"))
             sleep.assert_called_once_with(b.DOWNLOAD_RETRY_PAUSE)
             self.assertFalse((work / "source.webm.part").exists())
@@ -1314,6 +1314,226 @@ class SyncPlaylist(unittest.TestCase):
                 patch.object(b, "navidrome_songs", return_value=None), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(b.sync_playlist("mix", "Mix", csv), 69)
         self.assertEqual(json.loads(output.getvalue())["reason"], "navidrome_unavailable")
+
+
+class Uploads(unittest.TestCase):
+    """Audio files the user sent (e.g. to the bot on Telegram) instead of a link."""
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        (self.root / "library").mkdir()
+        (self.root / "uploads" / "audio").mkdir(parents=True)
+        from types import SimpleNamespace
+        for p in (patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root / "library"), "UPLOAD_DIR": str(self.root / "uploads"),
+                                          "LRCLIB_USER_AGENT": "", "MUSICBRAINZ_USER_AGENT": ""}),
+                  patch.object(b.shutil, "disk_usage", return_value=SimpleNamespace(free=4 * 1024 ** 3))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.mp3 = self.root / "uploads" / "audio" / "audio_063dae991426.mp3"
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                        "-metadata", "title=Rise, Player!", "-metadata", "artist=skeletalhypnagogia380",
+                        "-metadata", "date=2025", str(self.mp3)], check=True)
+
+    def test_file_names_are_looked_for_only_in_the_upload_folder(self):
+        full = "/Users/me/.hermes/profiles/music-butler/cache/audio/audio_063dae991426.mp3"
+        self.assertEqual(b.upload(full, resolve=True), "audio_063dae991426.mp3")
+        self.assertEqual(b.upload_path("audio_063dae991426.mp3"), self.mp3)
+        for bad, reason in [("../secrets/x.mp3", "file_not_found"), ("x.exe", "invalid_file"), (".hidden.mp3", "invalid_file"),
+                            ("..mp3", "invalid_file"), ("missing.mp3", "file_not_found")]:
+            with self.subTest(bad=bad), self.assertRaisesRegex(b.Failure, reason):
+                b.upload(bad, resolve=True)
+        (self.root / "uploads" / "documents").mkdir()
+        shutil.copyfile(self.mp3, self.root / "uploads" / "documents" / self.mp3.name)
+        with self.assertRaisesRegex(b.Failure, "ambiguous_file"):
+            b.upload_path(self.mp3.name)
+
+    def test_songs_need_a_url_or_a_file_and_real_names(self):
+        for song, reason in [({"artist": "A", "title": "S"}, "url_or_file_required"),
+                             ({"artist": "A", "title": "S", "url": "https://youtu.be/AAAAAAAAAAA", "file": "a.mp3"},
+                              "url_or_file_required"),
+                             ({"artist": "Artist Name", "title": "S", "url": "https://youtu.be/AAAAAAAAAAA"}, "placeholder_artist"),
+                             ({"artist": "A", "title": "Song Name", "url": "https://youtu.be/AAAAAAAAAAA"}, "placeholder_title"),
+                             ({"artist": "A", "title": "S", "album": "Unknown Album", "file": "a.mp3"}, "placeholder_album")]:
+            with self.subTest(song=song), self.assertRaisesRegex(b.Failure, reason) as cm:
+                b.parse({"songs": [song]})
+            self.assertEqual(cm.exception.item, 1)
+        release = b.parse({"songs": [{"artist": "skeletalhypnagogia380", "title": "Rise, Player!",
+                                      "file": "audio_063dae991426.mp3"}]})[0]
+        self.assertEqual(release["tracks"][0]["file"], "audio_063dae991426.mp3")
+        self.assertNotIn("url", release["tracks"][0])
+
+    def test_lookup_reads_the_file_tags(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            b.lookup(b.validate_lookup({"files": ["audio_063dae991426.mp3"]}, resolve=True))
+        entry = json.loads(output.getvalue())["files"][0]
+        self.assertEqual(entry["song"], {"artist": "skeletalhypnagogia380", "title": "Rise, Player!", "year": 2025})
+        self.assertEqual((entry["names"], entry["duration"]), ("file_tags", 2))
+        self.assertNotIn("musicbrainz", entry)  # off without a user agent
+
+    def test_import_a_file(self):
+        from mutagen.mp3 import MP3
+        release = b.parse({"songs": [{"artist": "skeletalhypnagogia380", "title": "Rise, Player!", "year": 2025,
+                                      "file": "audio_063dae991426.mp3"}]}, resolve=True)[0]
+        with patch.object(b, "scan", return_value="scheduled"), contextlib.redirect_stdout(io.StringIO()):
+            result = b.ingest(release)
+        song = next(Path(result["path"]).glob("*.mp3"))
+        self.assertEqual((str(MP3(song)["TPE1"]), str(MP3(song)["TIT2"])), ("skeletalhypnagogia380", "Rise, Player!"))
+        self.assertEqual(result["tracks"][0]["provider"], "upload")
+        self.assertTrue(self.mp3.exists())  # the user's file is only read
+        lib = b.read_library()
+        self.assertEqual(lib[0]["tracks"][0]["title"], "Rise, Player!")
+        self.assertNotIn("url", lib[0]["tracks"][0])
+
+
+class BotCheck(unittest.TestCase):
+    """YouTube's "Sign in to confirm you're not a bot" blocks the address for minutes."""
+    BLOCKED = "ERROR: [youtube] s2: Sign in to confirm you’re not a bot. Use --cookies-from-browser"
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        p = patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_acquire_waits_long_once_then_gives_a_bot_check_reason(self):
+        track = {"title": "Song", "url": "https://youtu.be/AAAAAAAAAAA"}
+        blocked = b.Failure("media_tool_failed", 69, detail=self.BLOCKED)
+        with patch.object(b, "download", side_effect=blocked) as download, patch.object(b.time, "sleep") as sleep, \
+                patch.object(b, "last_download", float("-inf")), contextlib.redirect_stdout(io.StringIO()) as output, \
+                self.assertRaises(b.Failure) as cm:
+            b.acquire(track, {}, self.root, {})
+        self.assertEqual((str(cm.exception), cm.exception.code), ("youtube_bot_check", 75))
+        self.assertEqual(download.call_count, 2)
+        sleep.assert_called_once_with(b.BOT_CHECK_PAUSE)
+        self.assertEqual(json.loads(output.getvalue())["reason"], "youtube_bot_check_pause")
+
+    def test_youtube_downloads_are_spaced(self):
+        track = {"title": "Song", "url": "https://youtu.be/AAAAAAAAAAA"}
+        with patch.object(b, "download", return_value=("src", "yt-dlp")), patch.object(b.time, "sleep") as sleep, \
+                patch.object(b, "last_download", float("-inf")):
+            b.acquire(track, {}, self.root, {})
+            b.acquire(track, {}, self.root, {})
+            b.acquire({"title": "Song", "url": "https://archive.org/download/x/y.flac"}, {}, self.root, {})
+        self.assertEqual(sleep.call_count, 1)
+        self.assertAlmostEqual(sleep.call_args.args[0], b.DOWNLOAD_SPACING, delta=1)
+
+    def test_blocked_songs_are_deferred_and_retried(self):
+        releases = b.parse({"origin": "discovery", "songs": [
+            {"artist": "A", "title": f"S{n}", "url": f"https://youtu.be/{n * 11}"} for n in "123"]})
+        outcomes = [{"scan": "scheduled", "tracks": [], "path": "/p"},
+                    b.Failure("youtube_bot_check", 75, detail=self.BLOCKED)]
+        with patch.object(b, "ingest", side_effect=outcomes) as ingest, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.import_all(releases), 75)
+        self.assertEqual(ingest.call_count, 2)
+        summary = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual((summary["failed"], summary["not_attempted"], summary["retry"]), ([], [], "automatic"))
+        self.assertEqual([d["titles"] for d in summary["deferred"]], [["S2"], ["S3"]])
+        deferred = json.loads((self.root / "discovery" / "deferred.json").read_text())["songs"]
+        self.assertEqual([(s["title"], s["origin"], s["url"][-11:]) for s in deferred],
+                         [("S2", "discovery", "2" * 11), ("S3", "discovery", "3" * 11)])
+        # Deferring the same songs again keeps one copy.
+        with contextlib.redirect_stdout(io.StringIO()):
+            b.defer(releases[1:])
+        self.assertEqual(len(json.loads((self.root / "discovery" / "deferred.json").read_text())["songs"]), 2)
+        with patch.object(b, "ingest", return_value={"scan": "scheduled", "tracks": [], "path": "/p"}) as ingest, \
+                patch.object(b, "url", side_effect=lambda value, hosts, resolve=False: value), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.retry(), 0)
+        self.assertEqual([r["tracks"][0]["title"] for r in [c.args[0] for c in ingest.call_args_list]], ["S2", "S3"])
+        self.assertEqual(len(json.loads(output.getvalue())["added"]), 2)
+        self.assertEqual(json.loads((self.root / "discovery" / "deferred.json").read_text()), {"songs": []})
+
+    def test_other_failures_are_not_deferred(self):
+        releases = b.parse({"songs": [{"artist": "A", "title": "S1", "url": "https://youtu.be/s1"}]})
+        with patch.object(b, "ingest", side_effect=b.Failure("busy_retry_later", 75)), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            b.import_all(releases)
+        summary = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(summary["failed"][0]["reason"], "busy_retry_later")
+        self.assertNotIn("deferred", summary)
+        self.assertFalse((self.root / "discovery" / "deferred.json").exists())
+
+
+class MusicBrainz(unittest.TestCase):
+    def setUp(self):
+        p = patch.dict(os.environ, {"MUSICBRAINZ_USER_AGENT": "music-butler-test/1 (test@example.com)"})
+        p.start()
+        self.addCleanup(p.stop)
+
+    @staticmethod
+    def recording(title, credits, date, score=100):
+        return {"score": score, "title": title, "first-release-date": date,
+                "artist-credit": [{"name": c, "joinphrase": ", "} for c in credits]}
+
+    def test_earliest_release_and_performers_only(self):
+        body = {"recordings": [
+            self.recording("Don’t Start Now", ["Dua Lipa"], "2026-05-22"),  # a live album
+            self.recording("Don’t Start Now", ["Dua Lipa"], "2019-10-31"),
+            self.recording("Don’t Start Now (Kungs remix)", ["Dua Lipa"], "2019"),
+            self.recording("Don't Start Now", ["Monaveen"], "2018-01-01"),
+            self.recording("Don't Start Now", ["Dua Lipa"], "2010", score=60),
+            self.recording("Don't Start Now", ["Dua Lipa"], None)]}
+        calls = []
+        def fake_fetch(address, headers=None, **kwargs):
+            calls.append((urllib.parse.parse_qs(urllib.parse.urlsplit(address).query)["query"][0], headers))
+            return json.dumps(body).encode()
+        with patch.object(b, "fetch", side_effect=fake_fetch), patch.object(b.time, "sleep"):
+            found = b.musicbrainz("Dua Lipa", "Don't Start Now (feat. Nobody)")
+        self.assertEqual(found, {"match": "found", "title": "Don’t Start Now", "artists": ["Dua Lipa"], "year": 2019})
+        self.assertEqual(calls[0][0], 'recording:"Don\'t Start Now" AND artist:"Dua Lipa"')
+        self.assertIn("test@example.com", calls[0][1]["User-Agent"])
+
+    def test_credits_list_every_performer_and_quotes_are_escaped(self):
+        body = {"recordings": [self.recording("Right Love", ["Mark Mendy", "Paradigm", "Tiffany Aris"], "2023-07-20")]}
+        with patch.object(b, "fetch", return_value=json.dumps(body).encode()) as fetch, patch.object(b.time, "sleep"):
+            self.assertEqual(b.musicbrainz("Mark Mendy", "Right Love")["artists"], ["Mark Mendy", "Paradigm", "Tiffany Aris"])
+            self.assertEqual(b.musicbrainz("A \"B\"", "C")["match"], "none")
+        self.assertIn('artist:"A \\"B\\""', urllib.parse.unquote_plus(fetch.call_args.args[0]))
+
+    def test_rate_limit_is_retried_and_off_without_a_user_agent(self):
+        busy = urllib.error.HTTPError("https://musicbrainz.org", 503, "busy", {}, None)
+        body = json.dumps({"recordings": [self.recording("S", ["A"], "2001")]}).encode()
+        with patch.object(b, "fetch", side_effect=[busy, body]), patch.object(b.time, "sleep"):
+            self.assertEqual(b.musicbrainz("A", "S")["year"], 2001)
+        with patch.object(b, "fetch", side_effect=[busy] * 3), patch.object(b.time, "sleep"):
+            self.assertEqual(b.checked("A", "S"), {"musicbrainz": "lookup_failed"})
+        with patch.dict(os.environ, {"MUSICBRAINZ_USER_AGENT": "", "LRCLIB_USER_AGENT": ""}), \
+                patch.object(b, "fetch") as fetch:
+            self.assertEqual(b.checked("A", "S"), {})
+        fetch.assert_not_called()
+
+    def test_search_names(self):
+        self.assertEqual(b.names_for("Dua Lipa - Don't Start Now", []), ("Dua Lipa", "Don't Start Now"))
+        results = [{"song": {"artist": "Monaveen", "title": "Don't Start Now"}},
+                   {"song": {"artist": "Dua Lipa", "title": "Don't Start Now"}}]
+        self.assertEqual(b.names_for("Dua Lipa Don't Start Now", results), ("Dua Lipa", "Don't Start Now"))
+        self.assertEqual(b.names_for("something else", results), (None, None))
+
+    def test_a_title_without_artist_gets_the_channel(self):
+        entry = {"id": "5aGXwHQEJtI", "extractor_key": "Youtube", "title": "All I do Is Win The Musical",
+                 "channel": "Music 2 Win", "duration": 270}
+        summary = b.video_summary(entry)
+        self.assertEqual((summary["names"], summary["song"]), ("guessed", {"artist": "Music 2 Win",
+                                                                          "title": "All I do Is Win The Musical"}))
+
+
+class LyricsBatches(MissingLyrics):
+    def test_each_run_takes_the_songs_checked_longest_ago(self):
+        for n in "abc":
+            self.release(f"{n}--x", n * 32, ["001-s.mp3"], [])
+        seen = []
+        def fake_get(lyrics, request, track, duration, dest):
+            seen.append(dest.parent.name[0])
+            return "unavailable"
+        with patch.object(b, "LYRICS_BATCH", 2), \
+                patch.object(b, "read_tags", return_value={"title": "S", "artist": "A", "duration": 100}), \
+                patch.object(b.Lyrics, "get", autospec=True, side_effect=fake_get), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(b.missing_lyrics(), 0)
+            self.assertEqual(b.missing_lyrics(), 0)
+        self.assertEqual(seen, ["a", "b", "c", "a"])
+        self.assertEqual([json.loads(line)["remaining"] for line in output.getvalue().splitlines()], [1, 1])
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 
 A small, stdlib-only chat loop that loads the Music Butler skill
 (skills/music-butler/SKILL.md) as its system prompt. It is built for small
-(~8 B) local models: butler_lookup searches YouTube for "artist title" texts
+(~8 B) local models: butler_lookup searches YouTube for "Artist - Title" texts
 (via yt-dlp in the downloader container), and butler_add takes a flat list of
 songs (one or many), writes the request file and runs `scripts/butler.sh add`,
 which validates and imports. The model sees only compact results.
@@ -55,16 +55,17 @@ TOOLS = [
             "name": "butler_lookup",
             "description": (
                 "Find sources before adding. Searches YouTube Music, then YouTube, for each text "
-                "in 'search' (e.g. 'Daft Punk Get Lucky'). Each result has title, channel, duration, "
+                "in 'search' (e.g. 'Daft Punk - Get Lucky'). Each result has title, channel, duration, "
                 "url and a 'song' object with the names to tag: exact when names is 'release', "
-                "guessed from the video title when names is 'guessed'. "
+                "guessed from the video title when names is 'guessed'. A 'musicbrainz' match gives "
+                "the performers ('artists') and first release 'year' to use. "
                 "'urls' returns the same details for links the owner gave. Downloads nothing."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "search": {"type": "array", "items": {"type": "string"},
-                               "description": "One search text per song: artist and title."},
+                               "description": "One search text per song: 'Artist - Title'."},
                     "urls": {"type": "array", "items": {"type": "string"},
                              "description": "Links the owner gave, to read their title and length."},
                 },
@@ -271,7 +272,7 @@ def lookup_request(arguments: dict) -> dict:
             if value:
                 request[key] = value
     if not request:
-        raise ToolError("give 'search' (list of 'artist title' texts) and/or 'urls'")
+        raise ToolError("give 'search' (list of 'Artist - Title' texts) and/or 'urls'")
     return request
 
 
