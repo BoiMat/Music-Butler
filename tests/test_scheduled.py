@@ -58,7 +58,7 @@ class Scheduled(unittest.TestCase):
     def test_failed_agent_still_reports(self):
         result = self.run_job("audit", SCHEDULE_COMMAND="false")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Music audit run exited with status 1.", result.stdout)
+        self.assertTrue(result.stdout.startswith("⚠️ Music audit run FAILED (exited with status 1)."), result.stdout)
 
     def fake_hermes(self, state_dir, session="s1", printed="noise"):
         """A hermes that answers `config path` with state_dir and runs a chat as session."""

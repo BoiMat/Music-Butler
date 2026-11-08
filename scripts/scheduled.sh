@@ -79,6 +79,7 @@ esac
 
 agent="$(setting SCHEDULE_AGENT)"
 status=0
+report=""
 case "$agent" in
     hermes)
         profile="$(setting HERMES_PROFILE music-butler)"
@@ -112,7 +113,7 @@ PY
         fi
         # Never silent: an empty report would skip delivery without a trace.
         [[ -n "${msg//[[:space:]]/}" ]] || msg="Music $job run finished, but its report could not be read (Hermes session ${sid:-unknown})."
-        printf '%s\n' "$msg" ;;
+        report="$msg" ;;
     command)
         command="$(setting SCHEDULE_COMMAND)"
         [[ -n "$command" ]] || { echo 'SCHEDULE_COMMAND is not set' >&2; exit 64; }
@@ -120,7 +121,7 @@ PY
         prompt="$task
 The skill is skills/$skill/SKILL.md in the current folder ($repo): read it first.
 REPO in it means this folder: run butler.sh exactly as scripts/butler.sh, write request files to requests/."
-        printf '%s\n' "$prompt" | "${cmd[@]}" || status=$? ;;
+        report="$(printf '%s\n' "$prompt" | "${cmd[@]}")" || status=$? ;;
     '') echo 'SCHEDULE_AGENT is not set (hermes or command); see README "Scheduled runs"' >&2; exit 64 ;;
     *) echo "unknown SCHEDULE_AGENT: $agent (hermes or command)" >&2; exit 64 ;;
 esac
@@ -128,5 +129,7 @@ esac
 # owner, the admin, opens them; the listener's Tempo would show stale songs. Its
 # output is not part of the report.
 "$(setting BUTLER_BIN scripts/butler.sh)" playlists > /dev/null 2>&1 || true
-# Exit 0 either way: a failed job still delivers its report and this line.
-(( status == 0 )) || printf 'Music %s run exited with status %s.\n' "$job" "$status"
+# Exit 0 either way, so the report is still delivered; a failure leads with a
+# warning, because Hermes lists every run that exits 0 as "ok".
+(( status == 0 )) || printf '⚠️ Music %s run FAILED (exited with status %s). Its output:\n\n' "$job" "$status"
+[[ -z "${report:-}" ]] || printf '%s\n' "$report"

@@ -37,11 +37,24 @@ x-tooling: &tooling
       read_only: true
       bind:
         create_host_path: false
+    # Audio files sent to the bot (e.g. Hermes' cache folder), read-only: songs can
+    # name one as "file" instead of a "url". Created empty when missing.
+    - type: bind
+      source: ${UPLOAD_INBOX:-./storage/uploads}
+      target: /uploads
+      read_only: true
+      bind:
+        create_host_path: true
   environment:
     LIBRARY_ROOT: /library
+    UPLOAD_DIR: /uploads
     DOWNLOAD_ALLOWED_HOSTS: ${DOWNLOAD_ALLOWED_HOSTS:-archive.org,upload.wikimedia.org,www.youtube.com,youtube.com,youtu.be,m.youtube.com,music.youtube.com}
     DOWNLOAD_USER_AGENT: ${DOWNLOAD_USER_AGENT:-}
     LRCLIB_USER_AGENT: ${LRCLIB_USER_AGENT:-}
+    # Lookups check names and years on MusicBrainz; blank = LRCLIB_USER_AGENT. Both blank = off.
+    MUSICBRAINZ_USER_AGENT: ${MUSICBRAINZ_USER_AGENT:-}
+    # Songs per page of `butler.sh songs` (choosing a playlist from the library).
+    MIX_PAGE_SIZE: ${MIX_PAGE_SIZE:-100}
     NAVIDROME_URL: http://navidrome:4533
     NAVIDROME_USER: ${NAVIDROME_USER:-}
     NAVIDROME_PASSWORD_FILE: ${NAVIDROME_PASSWORD_FILE:-/run/music-secrets/navidrome_password}

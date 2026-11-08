@@ -44,6 +44,10 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   background and reports every 20 songs. Each song is matched to YouTube Music
   by artist, title and length, and anything uncertain is listed instead of guessed.
   At the end the playlist appears in Tempo under its own name.
+- **Playlists from your own songs**: "make me a chill evening playlist". The
+  agent reads the library in numbered pages (`MIX_PAGE_SIZE`, default 100),
+  picks the songs that fit and the playlist appears in Tempo. Nothing is
+  downloaded, and a playlist it did not make is never replaced.
 - **Taste**: a few artists and a few words ("Italian pop, no trap") steer
   discovery until your own likes and ratings take over.
 - **Weekly discovery**: new songs from the YouTube Music radios of songs you

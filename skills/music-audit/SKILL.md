@@ -51,22 +51,28 @@ Check every release for:
    fixes above, durations within a few seconds).
 6. **Missing cover** (`"cover": false`) or a cover that is a video frame
    (the source was a music or lyric video, not an "Artist - Topic" upload).
-7. **Missing year** where the release year is known. A YouTube Music result
-   with `"names": "release"` for the same artist and title gives the year even
-   when its duration differs from the library copy (a remaster, an album or a
-   "Original Version" upload): duration matters for audio and lyrics, not for
-   the year. If release results disagree, use the earliest year.
+7. **Missing or wrong year**. The lookup's `"musicbrainz"` year (see below)
+   is when the song first came out: use it. Without one, a YouTube Music
+   result with `"names": "release"` for the same artist and title gives the
+   year even when its duration differs from the library copy (a remaster, an
+   album or an "Original Version" upload). If release results disagree, use
+   the earliest year.
 8. **Songwriters listed as artists**: some labels put the writers in the
    artist credits, so a track's `artists` can hold people who do not perform
    on it, e.g. `["Bad Bunny", "Benito A. Martinez Ocasio", "Scott Dittrich", ...]`
    or `["Thegiornalisti", "Tommaso Paradiso", "Dario Faini"]`. Suspect it when a
    track has more than 4 names, when a name is the main artist's legal name or
    a member of the band that is the main artist, or when a name is a known
-   songwriter or producer. Lookups return the same list, so they do not settle it.
+   songwriter or producer. YouTube results return the same list, but
+   `"musicbrainz"` lists the performers only: it settles it.
+9. **Made-up or missing names**, e.g. `Artist Name` / `Song Name`, or a title
+   that is a video title. Look up the track's own `url` (below): it gives the
+   source's names.
 
 To confirm the real names, album, year and a clean cover source, look the
 song up. Write `REPO/requests/lookup-<id>.json` with
-`{"search": ["artist title", ...]}` (up to 10) and run:
+`{"search": ["Artist - Title", ...], "urls": ["<a track's url>", ...]}` (up to
+10 in all) and run:
 
 ```
 REPO/scripts/butler.sh lookup <id>
@@ -74,7 +80,15 @@ REPO/scripts/butler.sh lookup <id>
 
 Results with `"source": "youtube_music"` and `"names": "release"` carry the
 release's own `song` names (`artist`, `title`, `album`, `year`, `artists`).
-Trust those over your memory.
+YouTube Music search can miss the real song (covers with few views come
+first): check that the artist is the right one.
+
+Each search and url also has `"musicbrainz"`, from the MusicBrainz music
+database: `{"match": "found", "title": ..., "artists": [...], "year": 2019}`.
+`artists` are the performers only; `year` is the earliest release of the
+song. With `"match": "found"`, its year and artists are certain: fix them.
+`"match": "none"` or `"lookup_failed"` settles nothing. Trust lookups over
+your memory.
 
 ## 3. Fix what is certain
 
@@ -85,9 +99,10 @@ imported. Run, once per audit:
 REPO/scripts/butler.sh lyrics
 ```
 
-It retries every song without lyrics (nothing else changes) and ends with a
-summary: `found` (now have synced lyrics), `missing` (with the reason) and
-`not_attempted` (LRCLIB rate limit: they wait for next week). Report how many
+It retries up to 40 songs without lyrics, those checked longest ago, so each
+week covers others (nothing else changes). It ends with a summary: `found`
+(now have synced lyrics), `missing` (with the reason), `not_attempted`
+(LRCLIB rate limit) and `remaining` (left for the next audits). Report how many
 were found. Never try to fix lyrics another way.
 
 Fix a problem yourself only when a lookup result or the library itself makes

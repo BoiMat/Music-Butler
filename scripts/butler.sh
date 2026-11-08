@@ -10,17 +10,23 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 usage() {
     cat >&2 <<'EOF'
 Usage: scripts/butler.sh <command>
-  lookup <id>      search YouTube / read source metadata for requests/lookup-<id>.json
-                   (downloads nothing)
+  lookup <id>      search YouTube / read link or sent-file metadata for
+                   requests/lookup-<id>.json, check names on MusicBrainz (downloads nothing)
   add <id>         validate requests/approved-<id>.json, then import it if valid
   validate <id>    check requests/approved-<id>.json offline (no download)
   import <id>      import requests/approved-<id>.json into the library
+  retry            import the songs YouTube's bot check held back now (this also
+                   happens on its own, in the background, after add/import)
   status           Navidrome health and library contents
   library [page]   releases with id, tags, cover/lyrics status, 20 per page
                    (JSON; "pages" says how many; default page 1)
   retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
   lyrics           retry synced lyrics (LRCLIB) for every song without them
   playlists        after imports: wait for the scan, refresh Discover Weekly etc.
+  songs [page]     the library's songs, numbered, MIX_PAGE_SIZE per page; page 1
+                   renumbers (JSON; "pages" says how many)
+  mix <id>         make a player playlist from requests/mix-<id>.json:
+                   {"name": "...", "songs": [numbers from songs]}
   remove <id>      move releases in requests/remove-<id>.json to the library trash
   discover         songs to add next: playlist queue, radio candidates, songs
                    rated 1 star to remove (JSON; downloads nothing)
@@ -38,7 +44,7 @@ EOF
 }
 
 # request_file <kind> <id> [ext]: requests/<kind>-<id>.<ext> (default json), kind is
-# approved, lookup, retag, remove, seeds or spotify.
+# approved, lookup, mix, retag, remove, seeds or spotify.
 request_file() {
     local id="${2:-}" ext="${3:-json}"
     # Small models often pass the file name: requests/lookup-songs.json means id "songs".
@@ -48,7 +54,7 @@ request_file() {
     # The error says what to do: small models otherwise guess, e.g. search words as arguments.
     local usage
     case "$1" in
-        lookup) usage="Lookup takes an id, not search words. First write $PWD/requests/lookup-<id>.json: {\"search\": [\"artist title\", ...]}. Then run butler.sh lookup <id>." ;;
+        lookup) usage="Lookup takes an id, not search words. First write $PWD/requests/lookup-<id>.json: {\"search\": [\"Artist - Title\", ...]}. Then run butler.sh lookup <id>." ;;
         spotify) usage="Run butler.sh inbox first. Then pass <name> of $PWD/requests/spotify-<name>.csv." ;;
         *) usage="First write $PWD/requests/$1-<id>.$ext. Then pass <id>." ;;
     esac
@@ -105,7 +111,11 @@ case "${1:-}" in
         # One step for agents: nothing is downloaded unless the whole request is valid.
         file="$(request_file approved "${2:-}")"
         "${compose[@]}" run --rm -T downloader --validate < "$file"
-        "${compose[@]}" run --rm -T downloader < "$file"
+        status=0
+        "${compose[@]}" run --rm -T downloader < "$file" || status=$?
+        # Songs YouTube's bot check held back are imported again later, in the background.
+        scripts/retry.sh start || true
+        exit "$status"
         ;;
     validate)
         file="$(request_file approved "${2:-}")"
@@ -113,12 +123,27 @@ case "${1:-}" in
         ;;
     import)
         file="$(request_file approved "${2:-}")"
-        "${compose[@]}" run --rm -T downloader < "$file"
+        status=0
+        "${compose[@]}" run --rm -T downloader < "$file" || status=$?
+        scripts/retry.sh start || true
+        exit "$status"
+        ;;
+    retry)
+        "${compose[@]}" run --rm -T downloader --retry < /dev/null
         ;;
     library)
         page="${2:-1}"
         [[ "$page" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'invalid page: use a number, e.g. 2' >&2; exit 64; }
         "${compose[@]}" run --rm -T downloader --library "$page" < /dev/null
+        ;;
+    songs)
+        page="${2:-1}"
+        [[ "$page" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'invalid page: use a number, e.g. 2' >&2; exit 64; }
+        "${compose[@]}" run --rm -T downloader --songs "$page" < /dev/null
+        ;;
+    mix)
+        file="$(request_file mix "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --mix < "$file"
         ;;
     lyrics)
         "${compose[@]}" run --rm -T downloader --lyrics < /dev/null

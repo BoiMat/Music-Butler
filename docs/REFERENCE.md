@@ -15,8 +15,14 @@ cp config/request.example.json requests/approved-mine.json
 ```
 
 One request can hold many songs:
-`{"songs": [{"artist", "title", "url", "album"?, "artists"?, "year"?, "artwork_url"?}, ...], "format"?, "quality"?}`.
+`{"songs": [{"artist", "title", "url" | "file", "album"?, "artists"?, "year"?, "artwork_url"?}, ...], "format"?, "quality"?}`.
 `artist` is the main (album) artist; `artists` lists everyone on the track, main artist first.
+Placeholder names (`Artist Name`, `Song Name`, `Unknown`...) are refused.
+`file` is an audio file the user sent instead of a link (mp3, flac, m4a, ogg,
+opus, wav), by name: it is looked for only in `UPLOAD_INBOX` and its direct
+subfolders (mounted read-only at `/uploads`), e.g. the Hermes profile's `cache`
+folder, where Telegram audio lands in `cache/audio`. Its embedded picture, if
+any, becomes the cover.
 Songs that share artist and album become one album in list order. Songs without
 `album` become singles named after the song. Releases are imported one after
 another. A bad or unavailable source skips to the next release; storage or lock
@@ -26,7 +32,15 @@ problems stop the batch. The original single-release format (`kind`, `artist`,
 then YouTube videos. Each result carries a `song` object with the names to tag:
 the release's own artist(s), title, album and year for YouTube Music / "Artist -
 Topic" uploads (`"names": "release"`), or names guessed from the video title
-with labels like "(Official Video)" removed (`"names": "guessed"`). The agent
+with labels like "(Official Video)" removed (`"names": "guessed"`; a title
+without an artist gets the channel's name). `"files"` read a sent file's own
+tags. Every search, url and file is also checked on
+[MusicBrainz](https://musicbrainz.org) (`"musicbrainz"`: the performers only,
+without the songwriters some labels credit, and the year the song first came
+out). Set `MUSICBRAINZ_USER_AGENT` to a name and contact (blank =
+`LRCLIB_USER_AGENT`; both blank = off); searches are best written
+`Artist - Title`. YouTube Music search without an account can rank covers
+above the real song, so the skills prefer the MusicBrainz year and artists. The agent
 chooses and copies `song` and `url`; every imported track is an explicit URL in the request. No artist-wide crawling or
 playlist expansion. MP3 quality is
 `128|192|256|320`; FLAC compression is `0`–`8` (strings). Lossy-to-FLAC
@@ -61,12 +75,22 @@ different duration and usually gets no lyrics, which is why the skill prefers
 "Official Audio" uploads. Missing artwork or synced lyrics does not prevent import. LRCLIB answers 503 under load
 and gains lyrics over time, so busy or failed requests are retried, a release entry with
 only plain lyrics falls back to the same strict search, and `butler.sh lyrics` (run by the
-weekly audit) retries every song that still has none.
+weekly audit) retries songs that still have none, 40 per run, those checked longest ago
+first (state in `lyrics-checked.json` in the library).
 
 Each release emits a JSON `complete` event with files, hashes, lyrics/artwork
 status and scan status. The last line is always one `summary` event listing what
 was `added`, what `failed`, and what was `not_attempted`. Retry only the latter
-two; re-adding creates duplicates. Each **whole album** appears atomically in the library.
+two; re-adding creates duplicates.
+
+**YouTube's bot check** ("Sign in to confirm you're not a bot") blocks an
+address for minutes at a time, more often on shared addresses (mobile/CGNAT).
+YouTube downloads are spaced 15 s apart; on a bot check the importer waits 5
+minutes once, then stops. The rest of the batch is listed as `deferred`, kept
+in `discovery/deferred.json`, and `scripts/retry.sh` (started by `butler.sh
+add`/`import`) imports it again in the background after 1, 2 and 4 hours
+(`RETRY_DELAYS`), reporting through `PLAYLIST_NOTIFY` and `requests/retry.log`.
+`butler.sh retry` does it at once. No cookies are used. Each **whole album** appears atomically in the library.
 Navidrome's watcher plus a one-minute schedule arranges discovery without
 credentials. Optional admin `startScan` is described in the blueprint; a scan
 request is **not** a guarantee that the library is already indexed.
@@ -271,6 +295,7 @@ and use `provider: custom`, `base_url: http://localhost:11434/v1`.
 │   ├── butler.sh                    # fixed agent entry point
 │   ├── agent.py                     # local Ollama chat agent
 │   ├── install_hermes_skill.sh      # render the skills + cron scripts into a Hermes profile
+│   ├── retry.sh                     # background retry of songs YouTube's bot check held back
 │   ├── scheduled.sh                 # scheduled audit / bootstrap / weekly discovery runs
 │   ├── backup.sh                    # encrypted restic backups
 │   ├── setup.sh

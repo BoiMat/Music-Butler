@@ -72,7 +72,7 @@ Choose in this order until you have the mode's number of songs:
 This is the music-butler flow. Its rules apply here too.
 
 1. Lookup: write `REPO/requests/lookup-<id>.json` with at most 10 searches per
-   file (`artist title`; for queue songs, their `search`), then run
+   file (`Artist - Title`; for queue songs, their `search`), then run
    `REPO/scripts/butler.sh lookup <id>`. For more than 10 songs, use several
    files with different ids.
 2. For each song, pick one result. Prefer a `"source": "youtube_music"` result
@@ -84,7 +84,8 @@ This is the music-butler flow. Its rules apply here too.
    is unattended.
 3. Write ONE `REPO/requests/approved-<id>.json` for all chosen songs. Copy each
    result's `url` and `song` (`artist`, `title`, `album`, `year`, `artists`)
-   exactly, and give each song its `origin`:
+   exactly, and give each song its `origin`. When the search has
+   `"musicbrainz": {"match": "found"}`, take `year` and `artists` from it:
 
 ```json
 {"songs": [
@@ -99,9 +100,11 @@ This is the music-butler flow. Its rules apply here too.
    `origin` is `playlist`, `seed` or `discovery`.
 4. Run `REPO/scripts/butler.sh add <id>` once and wait until it exits (it can
    take many minutes). The last line is `"event": "summary"`: `added`,
-   `failed` (with `reason`), `not_attempted`, and `skipped` (songs already in
-   the library, which is fine). On `busy_retry_later`, wait a minute and run
-   the same `add` again. Never add a song listed under `added` again.
+   `failed` (with `reason`), `not_attempted`, `skipped` (songs already in
+   the library, which is fine) and `deferred` (YouTube blocked downloads for
+   now: they are retried on their own later, never add them again). On
+   `busy_retry_later`, wait a minute and run the same `add` again. Never add a
+   song listed under `added` again.
 
 ## 5. Report
 
@@ -110,6 +113,8 @@ Keep it short. It is sent to the user's phone:
   Group by origin: from your playlists / from your artists / new discoveries.
 - Removed: songs rated 1 star, moved to the trash.
 - Failed songs in one line, with their `reason`.
+- Deferred: "N songs are waiting: YouTube blocked downloads for now; they are
+  retried on their own and you get a message."
 - Bootstrap: how many songs the library has now (`library_songs` + added).
 - Ending: "Like songs in Tempo to get more like them; 1 star removes a song.
   New songs are in the *Discover Weekly* playlist."
