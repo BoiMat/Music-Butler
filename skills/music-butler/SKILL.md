@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole Spotify playlist (CSV), or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported, or asks for a music backup.
+description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole Spotify playlist (CSV), make a playlist from songs already in the library, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), or asks for a music backup.
 ---
 
 # Music Butler
@@ -166,6 +166,25 @@ https://exportify.app and sends you the file.
 "How is the import going?": run `butler.sh playlist <name>` again; it prints
 the last report. Failed or "no certain match" songs can be added one by one
 the normal way.
+
+## Playlist from the library
+
+"Make me a playlist of ..." from songs the user already has. Never add or
+download songs for it.
+
+1. Run `REPO/scripts/butler.sh songs 1`. Its last line has `songs`, numbered
+   lines like `12. Artist - Title (2013, 4 stars, 7 plays)`, and `pages`.
+2. Write down the numbers that fit the request. Use what you know about each
+   artist and song. Then run `songs 2`, `songs 3`... until `next` says
+   `last page`. Read every page before choosing.
+3. Write `REPO/requests/mix-<id>.json`, the numbers best first:
+   `{"name": "Rainy Day", "songs": [12, 40, 7]}`
+   About 20-40 songs unless the user asked for a number. Name it after the request.
+4. Run `REPO/scripts/butler.sh mix <id>`. Tell the user the name, how many
+   songs, and that it is in Tempo. `playlist_name_taken_choose_another`: pick
+   another name and run `mix` again with a new id.
+
+Same name again ("add more to Rainy Day", "redo it") replaces that playlist's songs.
 
 ## Other commands
 

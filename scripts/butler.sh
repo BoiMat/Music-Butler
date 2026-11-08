@@ -23,6 +23,10 @@ Usage: scripts/butler.sh <command>
   retag <id>       fix tags/covers from requests/retag-<id>.json (no re-download)
   lyrics           retry synced lyrics (LRCLIB) for every song without them
   playlists        after imports: wait for the scan, refresh Discover Weekly etc.
+  songs [page]     the library's songs, numbered, MIX_PAGE_SIZE per page; page 1
+                   renumbers (JSON; "pages" says how many)
+  mix <id>         make a player playlist from requests/mix-<id>.json:
+                   {"name": "...", "songs": [numbers from songs]}
   remove <id>      move releases in requests/remove-<id>.json to the library trash
   discover         songs to add next: playlist queue, radio candidates, songs
                    rated 1 star to remove (JSON; downloads nothing)
@@ -40,7 +44,7 @@ EOF
 }
 
 # request_file <kind> <id> [ext]: requests/<kind>-<id>.<ext> (default json), kind is
-# approved, lookup, retag, remove, seeds or spotify.
+# approved, lookup, mix, retag, remove, seeds or spotify.
 request_file() {
     local id="${2:-}" ext="${3:-json}"
     # Small models often pass the file name: requests/lookup-songs.json means id "songs".
@@ -131,6 +135,15 @@ case "${1:-}" in
         page="${2:-1}"
         [[ "$page" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'invalid page: use a number, e.g. 2' >&2; exit 64; }
         "${compose[@]}" run --rm -T downloader --library "$page" < /dev/null
+        ;;
+    songs)
+        page="${2:-1}"
+        [[ "$page" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'invalid page: use a number, e.g. 2' >&2; exit 64; }
+        "${compose[@]}" run --rm -T downloader --songs "$page" < /dev/null
+        ;;
+    mix)
+        file="$(request_file mix "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --mix < "$file"
         ;;
     lyrics)
         "${compose[@]}" run --rm -T downloader --lyrics < /dev/null

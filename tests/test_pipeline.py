@@ -1316,6 +1316,80 @@ class SyncPlaylist(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["reason"], "navidrome_unavailable")
 
 
+class MixFromLibrary(unittest.TestCase):
+    """A playlist chosen from the library's songs: numbered pages, then the numbers."""
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.songs = [{"id": f"nd-{i}", "artist": f"Artist {i:02}", "title": f"Song {i}", "year": 2000 + i,
+                       "genre": "Pop", "playCount": i % 3, "userRating": 5 if i == 1 else 0, "starred": i == 2}
+                      for i in range(1, 26)][::-1]
+        self.playlists = []
+        self.calls = []
+        for p in (patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root), "NAVIDROME_LISTENER_USER": "tempo",
+                                          "MIX_PAGE_SIZE": "20"}),
+                  patch.object(b, "navidrome_songs", side_effect=lambda: self.songs),
+                  patch.object(b, "subsonic", side_effect=self.fake_subsonic)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_subsonic(self, endpoint, params=None, account=None, **kwargs):
+        self.calls.append((endpoint, params))
+        if endpoint == "getPlaylists":
+            return {"playlists": {"playlist": self.playlists}}
+        if endpoint == "createPlaylist" and "name" in params:
+            self.playlists.append({"id": "new1", "name": params["name"], "owner": "tempo"})
+            return {"playlist": {"id": "new1"}}
+        return {}
+
+    def run_cli(self, fn, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = fn(*args)
+        return code, json.loads(out.getvalue().splitlines()[-1])
+
+    def test_pages_are_numbered_in_artist_order_and_short(self):
+        code, page = self.run_cli(b.mix_songs, 1)
+        self.assertEqual((code, page["pages"], page["songs_total"], len(page["songs"])), (0, 2, 25, 20))
+        self.assertEqual(page["songs"][0], "1. Artist 01 - Song 1 (2001, Pop, 5 stars, 1 plays)")
+        self.assertEqual(page["songs"][1], "2. Artist 02 - Song 2 (2002, Pop, liked, 2 plays)")
+        self.assertEqual(page["next"], "songs 2")
+        self.songs = []  # page 2 reads the snapshot, not Navidrome again
+        code, page = self.run_cli(b.mix_songs, 2)
+        self.assertEqual((code, page["songs"][0][:4], page["next"]), (0, "21. ", "last page: write the mix file"))
+        self.assertEqual(self.run_cli(b.mix_songs, 3)[1]["reason"], "no_such_page")
+
+    def test_page_2_needs_page_1_first(self):
+        self.assertEqual(self.run_cli(b.mix_songs, 2)[1]["reason"], "run_songs_page_1_first")
+        self.assertEqual(self.run_cli(b.make_mix, {"name": "X", "songs": [1]})[1]["reason"], "run_songs_page_1_first")
+
+    def test_mix_creates_then_updates_its_own_playlist(self):
+        self.run_cli(b.mix_songs, 1)
+        code, out = self.run_cli(b.make_mix, {"name": "Rainy day", "songs": [3, 1, 3, 99]})
+        self.assertEqual(code, 0)
+        self.assertEqual(out, {"event": "summary", "ok": True, "playlist": "Rainy day", "songs": 2, "updated": False,
+                               "unknown_numbers": [99]})
+        self.assertIn(("createPlaylist", {"name": "Rainy day", "songId": ["nd-3", "nd-1"]}), self.calls)
+        code, out = self.run_cli(b.make_mix, {"name": "rainy DAY", "songs": [2]})
+        self.assertEqual((code, out["updated"]), (0, True))
+        self.assertIn(("createPlaylist", {"playlistId": "new1", "songId": ["nd-2"]}), self.calls)
+
+    def test_never_replaces_a_playlist_it_did_not_make(self):
+        self.run_cli(b.mix_songs, 1)
+        self.playlists = [{"id": "spotify1", "name": "Road Trip", "owner": "tempo"}]
+        code, out = self.run_cli(b.make_mix, {"name": "Road trip", "songs": [1]})
+        self.assertEqual((code, out["reason"]), (73, "playlist_name_taken_choose_another"))
+        self.assertNotIn("createPlaylist", [c[0] for c in self.calls])
+
+    def test_mix_file_is_validated(self):
+        for bad, reason in [({"songs": [1]}, "invalid_playlist_name"), ({"name": "X"}, "mix_needs_song_numbers"),
+                            ({"name": "X", "songs": ["1"]}, "song_numbers_must_be_numbers"),
+                            ({"name": "X", "songs": [True]}, "song_numbers_must_be_numbers"),
+                            ({"name": "X", "songs": [1], "extra": 1}, "mix_needs_name_and_songs"),
+                            ({"name": "X", "songs": list(range(1, 502))}, "too_many_songs")]:
+            with self.subTest(bad=bad), self.assertRaisesRegex(b.Failure, reason):
+                b.validate_mix(bad)
+
+
 class Uploads(unittest.TestCase):
     """Audio files the user sent (e.g. to the bot on Telegram) instead of a link."""
     def setUp(self):

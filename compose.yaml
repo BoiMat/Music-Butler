@@ -53,6 +53,8 @@ x-tooling: &tooling
     LRCLIB_USER_AGENT: ${LRCLIB_USER_AGENT:-}
     # Lookups check names and years on MusicBrainz; blank = LRCLIB_USER_AGENT. Both blank = off.
     MUSICBRAINZ_USER_AGENT: ${MUSICBRAINZ_USER_AGENT:-}
+    # Songs per page of `butler.sh songs` (choosing a playlist from the library).
+    MIX_PAGE_SIZE: ${MIX_PAGE_SIZE:-100}
     NAVIDROME_URL: http://navidrome:4533
     NAVIDROME_USER: ${NAVIDROME_USER:-}
     NAVIDROME_PASSWORD_FILE: ${NAVIDROME_PASSWORD_FILE:-/run/music-secrets/navidrome_password}

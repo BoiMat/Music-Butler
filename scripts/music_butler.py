@@ -2010,6 +2010,110 @@ def sync_playlist(playlist, name, raw):
     return 0
 
 
+MIX_MAX = 500  # songs in one playlist made from the library
+
+
+def mix_page_size():
+    try:
+        size = int(os.environ.get("MIX_PAGE_SIZE") or 100)
+    except ValueError:
+        size = 100
+    return min(max(size, 20), 1000)
+
+
+def song_line(number, song):
+    """"12. Artist - Title (2013, Disco, 5 stars, 14 plays)": short, so a small model
+    can read a whole page and copy back only the number."""
+    extra = [str(song["year"])] if isinstance(song.get("year"), int) and song["year"] > 0 else []
+    genre = clip(song.get("genre"), 40)
+    if genre:
+        extra.append(genre)
+    if song.get("starred"):
+        extra.append("liked")
+    if isinstance(song.get("userRating"), int) and song["userRating"] > 0:
+        extra.append(f"{song['userRating']} stars")
+    if isinstance(song.get("playCount"), int) and song["playCount"] > 0:
+        extra.append(f"{song['playCount']} plays")
+    line = f"{number}. {clip(song.get('artist'), 80) or '?'} - {clip(song.get('title'), 120) or '?'}"
+    return line + (f" ({', '.join(extra)})" if extra else "")
+
+
+def mix_songs(page):
+    """One page of the library's songs, numbered, for choosing a playlist. Page 1 takes
+    a fresh snapshot, so the numbers stay the same until the playlist is made."""
+    root = library_root()
+    if page == 1:
+        songs = navidrome_songs()
+        if songs is None:
+            emit("error", code=69, reason="navidrome_unavailable")
+            return 69
+        songs = sorted((s for s in songs if isinstance(s.get("id"), str)),
+                       key=lambda s: (norm(s.get("artist")), norm(s.get("title")), s["id"]))
+        snapshot = [{"id": s["id"], "line": song_line(i, s)} for i, s in enumerate(songs, 1)]
+        write_json(discovery_path(root, "mix-songs.json"), snapshot)
+    else:
+        snapshot = read_state(root, "mix-songs.json", [])
+        if not snapshot:
+            emit("error", code=64, reason="run_songs_page_1_first")
+            return 64
+    size = mix_page_size()
+    pages = max(1, math.ceil(len(snapshot) / size))
+    if not 1 <= page <= pages:
+        emit("error", code=64, reason="no_such_page", pages=pages)
+        return 64
+    emit("songs", page=page, pages=pages, songs_total=len(snapshot),
+         songs=[s["line"] for s in snapshot[(page - 1) * size:page * size]],
+         next=(f"songs {page + 1}" if page < pages else "last page: write the mix file"))
+    return 0
+
+
+def validate_mix(data):
+    if not isinstance(data, dict) or set(data) - {"name", "songs"}:
+        raise Failure("mix_needs_name_and_songs", 65)
+    name = text(data.get("name"), "playlist_name", limit=100)
+    numbers = data.get("songs")
+    if not isinstance(numbers, list) or not numbers:
+        raise Failure("mix_needs_song_numbers", 65)
+    if len(numbers) > MIX_MAX:
+        raise Failure("too_many_songs", 65)
+    if not all(isinstance(n, int) and not isinstance(n, bool) for n in numbers):
+        raise Failure("song_numbers_must_be_numbers", 65)
+    return name, list(dict.fromkeys(numbers))
+
+
+def make_mix(data):
+    """Create (or update) the listener's playlist from song numbers of `songs`. A
+    playlist of the same name that Music Butler did not make is never replaced."""
+    name, numbers = validate_mix(data)
+    root = library_root()
+    snapshot = read_state(root, "mix-songs.json", [])
+    if not snapshot:
+        emit("error", code=64, reason="run_songs_page_1_first")
+        return 64
+    unknown = [n for n in numbers if not 1 <= n <= len(snapshot)]
+    order = [snapshot[n - 1]["id"] for n in numbers if 1 <= n <= len(snapshot)]
+    if not order:
+        emit("error", code=65, reason="no_known_song_numbers", unknown=unknown[:20])
+        return 65
+    account = listener_account()
+    owner = os.environ.get(account + "_USER")
+    made = read_state(root, "mixes.json", {})
+    same = [p for p in (subsonic("getPlaylists", account=account) or {}).get("playlists", {}).get("playlist", [])
+            if norm(p.get("name")) == norm(name) and p.get("owner") == owner]
+    if same and made.get(norm(name)) != same[0].get("id"):
+        emit("error", code=73, reason="playlist_name_taken_choose_another", playlist=same[0].get("name"))
+        return 73
+    params = {"playlistId": same[0]["id"]} if same else {"name": name}
+    response = subsonic("createPlaylist", {**params, "songId": order}, account=account) or {}
+    playlist_id = (response.get("playlist") or {}).get("id") or (same[0]["id"] if same else None)
+    if playlist_id:
+        made[norm(name)] = playlist_id
+        write_json(discovery_path(root, "mixes.json"), made)
+    emit("summary", ok=True, playlist=name, songs=len(order), updated=bool(same),
+         **({"unknown_numbers": unknown[:20]} if unknown else {}))
+    return 0
+
+
 def interleave(old, new):
     """Spread a new playlist evenly through the queue, so every import day mixes
     all playlists instead of working through them one after another."""
@@ -2442,6 +2546,10 @@ def main():
     mode.add_argument("--playlist-sync", metavar="ID",
                       help="Create/update the listener's Navidrome playlist from a playlist CSV on stdin")
     parser.add_argument("--name", help="Playlist name for --playlist-sync (default: from the ID)")
+    mode.add_argument("--songs", type=int, metavar="PAGE",
+                      help="Print one page of the library's songs, numbered, to choose a playlist from; reads no stdin")
+    mode.add_argument("--mix", action="store_true",
+                      help='Make the listener\'s playlist from {"name": ..., "songs": [numbers from --songs]}')
     mode.add_argument("--playlists", action="store_true",
                       help="Wait for the scan, then refresh the smart playlists as their owner; reads no stdin")
     mode.add_argument("--lyrics", action="store_true",
@@ -2466,6 +2574,8 @@ def main():
             return refresh_playlists()
         if args.retry:
             return retry()
+        if args.songs is not None:
+            return mix_songs(args.songs)
         limit = (MAX_PLAYLIST if args.queue or args.playlist_check or args.playlist is not None
                  or args.playlist_sync is not None else MAX_REQUEST)
         raw = sys.stdin.buffer.read(limit + 1)
@@ -2485,6 +2595,8 @@ def main():
                 raise Failure("invalid_playlist_id", 64)
             name = text(args.name or args.playlist_sync.replace("-", " ").title(), "playlist_name", limit=100)
             return sync_playlist(args.playlist_sync, name, raw)
+        if args.mix:
+            return make_mix(json.loads(raw))
         if args.seeds:
             return merge_seeds(validate_seeds(json.loads(raw)))
         if args.lookup:
