@@ -169,22 +169,16 @@ the normal way.
 
 ## Playlist from the library
 
-"Make me a playlist of ..." from songs the user already has. Never add or
-download songs for it.
+For "make me a playlist of ..." from songs the user has. Download nothing.
 
-1. Run `REPO/scripts/butler.sh songs 1`. Its last line has `songs`, numbered
-   lines like `12. Artist - Title (2013, 4 stars, 7 plays)`, and `pages`.
-2. Write down the numbers that fit the request. Use what you know about each
-   artist and song. Then run `songs 2`, `songs 3`... until `next` says
-   `last page`. Read every page before choosing.
-3. Write `REPO/requests/mix-<id>.json`, the numbers best first:
-   `{"name": "Rainy Day", "songs": [12, 40, 7]}`
-   About 20-40 songs unless the user asked for a number. Name it after the request.
-4. Run `REPO/scripts/butler.sh mix <id>`. Tell the user the name, how many
-   songs, and that it is in Tempo. `playlist_name_taken_choose_another`: pick
-   another name and run `mix` again with a new id.
+1. Run `REPO/scripts/butler.sh songs 1`, then `songs 2`, `songs 3`... until
+   `next` says `last page`. Each line is `number. Artist - Title (year, ...)`.
+2. Pick 20-40 songs that fit (or the number asked for), best first.
+3. Write `REPO/requests/mix-<id>.json`: `{"name": "Rainy Day", "songs": [12, 40, 7]}`
+4. Run `REPO/scripts/butler.sh mix <id>`. Reply: name, song count, it is in Tempo.
 
-Same name again ("add more to Rainy Day", "redo it") replaces that playlist's songs.
+Changing a playlist: write ALL its songs again under the same name.
+`playlist_name_taken_choose_another`: use another name.
 
 ## Other commands
 
