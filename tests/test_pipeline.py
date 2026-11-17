@@ -1092,6 +1092,57 @@ class LibraryPages(unittest.TestCase):
         self.assertEqual(self.page(1, [])[1]["releases"], [])
 
 
+class KeepForAudit(unittest.TestCase):
+    """Songs the user checked: `keep` remembers the release, `library` marks it for the audit."""
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.releases = [
+            {"id": "a" * 32, "artist": "Music 2 Win", "album": "All I Do Is Win (The Musical)", "tracks": [
+                {"n": 1, "title": "All I Do Is Win (The Musical)", "artist": "Music 2 Win",
+                 "url": "https://youtu.be/5aGXwHQEJtI"}]},
+            {"id": "b" * 32, "artist": "DJ Khaled", "album": "Victory", "tracks": [
+                {"n": 1, "title": "All I Do Is Win", "artist": "DJ Khaled",
+                 "artists": ["DJ Khaled", "T-Pain"], "url": "https://www.youtube.com/watch?v=iVXG1nzMznU"}]},
+            {"id": "c" * 32, "artist": "Loren Allred", "album": "Never Enough", "tracks": [
+                {"n": 1, "title": "Never Enough", "artist": "Loren Allred"}]}]
+        for p in (patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root)}),
+                  patch.object(b, "read_library", side_effect=lambda: self.releases)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def keep(self, *songs):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = b.keep_songs(b.validate_keep({"songs": list(songs)}))
+        return code, json.loads(out.getvalue().splitlines()[-1])
+
+    def library(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            b.library_page(1)
+        return {r["id"][0]: r.get("keep") for r in json.loads(out.getvalue())["releases"]}
+
+    def test_a_link_from_the_audit_report_marks_its_release(self):
+        code, out = self.keep("https://www.youtube.com/watch?v=5aGXwHQEJtI")
+        self.assertEqual((code, out["kept"]), (0, ["Music 2 Win - All I Do Is Win (The Musical)"]))
+        self.assertEqual(self.library(), {"a": True, "b": None, "c": None})
+        self.keep("Never Enough")
+        self.assertEqual(self.library(), {"a": True, "b": None, "c": True})
+
+    def test_a_title_two_songs_share_is_ambiguous_until_the_artist_is_given(self):
+        code, out = self.keep("all i do is win")
+        self.assertEqual(code, 65)
+        self.assertEqual(out["ambiguous"][0]["matches"],
+                         ["Music 2 Win - All I Do Is Win (The Musical)", "DJ Khaled - All I Do Is Win"])
+        self.assertEqual(self.library(), {"a": None, "b": None, "c": None})
+        code, out = self.keep("T-Pain - All I Do Is Win", "Nobody - Unknown Song")
+        self.assertEqual((code, out["kept"], out["not_found"]), (65, ["DJ Khaled - Victory"], ["Nobody - Unknown Song"]))
+
+    def test_keep_file_is_validated(self):
+        for bad in ({}, {"songs": []}, {"songs": "x"}, {"songs": ["x"], "extra": 1}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(b.Failure, "keep_needs_songs"):
+                b.validate_keep(bad)
+
+
 class MissingLyrics(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
