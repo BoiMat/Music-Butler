@@ -57,6 +57,7 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   library; nothing is removed by age or play count.
 - **Weekly audit**: a stronger model checks tags and covers and fixes what it is
   sure about, and lyrics are retried for songs that had none (LRCLIB grows).
+  Tell the bot "keep <song>" and the audit stops asking about it.
 - **Safe defaults**: hardened containers (read-only, no capabilities, non-root),
   Navidrome on loopback only, a download host allowlist, every import logged
   with hashes, and encrypted [restic](https://restic.net) backups.

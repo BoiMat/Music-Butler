@@ -111,7 +111,11 @@ featured artists. `remove` only moves releases to `<library>/.trash`; delete
 that folder yourself when you are sure. Both take the import lock and request a scan.
 [`skills/music-audit/SKILL.md`](../skills/music-audit/SKILL.md) lets a stronger
 model do this periodically: read the library, confirm names with lookups, fix
-what is certain and report the rest.
+what is certain and report the rest. A song you checked and want as it is
+("keep All I Do Is Win" to the bot) is skipped from then on: `butler.sh keep <id>`
+reads `requests/keep-<id>.json` (`{"songs": [title, "Artist - Title" or link]}`),
+remembers its release in `<library>/discovery/audit-keep.json`, and `library`
+marks it `"keep": true`.
 
 **Artist pictures** come from Navidrome's Deezer agent, by artist name (Navidrome
 sends artist names to Deezer). Set `DEEZER_ENABLED=false` in `.env` to turn it off.

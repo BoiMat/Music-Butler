@@ -31,6 +31,8 @@ Usage: scripts/butler.sh <command>
   discover         songs to add next: playlist queue, radio candidates, songs
                    rated 1 star to remove (JSON; downloads nothing)
   seeds <id>       merge taste seeds from requests/seeds-<id>.json
+  keep <id>        songs in requests/keep-<id>.json are fine as they are: the
+                   weekly audit no longer reports or changes them
   queue <id>       queue the songs of requests/spotify-<id>.csv (an Exportify export)
   playlist <id>    import all of requests/spotify-<id>.csv now, in the background,
                    20 songs at a time with a report after each (again: progress)
@@ -44,7 +46,7 @@ EOF
 }
 
 # request_file <kind> <id> [ext]: requests/<kind>-<id>.<ext> (default json), kind is
-# approved, lookup, mix, retag, remove, seeds or spotify.
+# approved, keep, lookup, mix, retag, remove, seeds or spotify.
 request_file() {
     local id="${2:-}" ext="${3:-json}"
     # Small models often pass the file name: requests/lookup-songs.json means id "songs".
@@ -165,6 +167,10 @@ case "${1:-}" in
     seeds)
         file="$(request_file seeds "${2:-}")"
         "${compose[@]}" run --rm -T downloader --seeds < "$file"
+        ;;
+    keep)
+        file="$(request_file keep "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --keep < "$file"
         ;;
     queue)
         file="$(request_file spotify "${2:-}" csv)"

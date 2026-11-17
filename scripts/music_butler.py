@@ -1196,9 +1196,83 @@ def library_page(page):
     if not 1 <= page <= pages:
         emit("error", code=64, reason="no_such_page", pages=pages)
         return 64
+    kept = kept_releases()
     emit("library", page=page, pages=pages, releases_total=len(releases),
-         releases=releases[(page - 1) * LIBRARY_PAGE:page * LIBRARY_PAGE])
+         releases=[{**r, "keep": True} if r.get("id") in kept else r
+                   for r in releases[(page - 1) * LIBRARY_PAGE:page * LIBRARY_PAGE]])
     return 0
+
+
+KEEP_FILE = "audit-keep.json"
+
+
+def kept_releases():
+    """Release ids the user checked and wants kept as they are: the audit skips them."""
+    try:
+        root = library_root()
+    except Failure:
+        return {}
+    kept = read_state(root, KEEP_FILE, {}).get("releases")
+    return kept if isinstance(kept, dict) else {}
+
+
+def validate_keep(data):
+    """{"songs": ["Title" | "Artist - Title" | a track's link, ...]}"""
+    if not isinstance(data, dict) or set(data) != {"songs"} or not isinstance(data["songs"], list) \
+            or not data["songs"]:
+        raise Failure("keep_needs_songs")
+    if len(data["songs"]) > 20:
+        raise Failure("too_many_songs")
+    return [text(s, "song") for s in data["songs"]]
+
+
+def keep_matches(entry, releases):
+    """Releases with a track that is this song: same link, or same title (and artist when given)."""
+    vid = video_id(entry)
+    if vid:
+        return [r for r in releases if any(video_id(t.get("url")) == vid for t in r["tracks"])]
+    artist, _, title = entry.rpartition(" - ") if " - " in entry else ("", "", entry)
+    want, by = norm(base_title(title)), norm(main_artist(artist))
+    if not want:
+        return []
+
+    def found(exact):
+        out = []
+        for r in releases:
+            for t in r["tracks"]:
+                have = norm(base_title(t.get("title")))
+                hit = have == want if exact else want in norm(t.get("title"))
+                names = norm(" ".join([t.get("artist") or "", r.get("artist") or ""] + (t.get("artists") or [])))
+                if hit and (not by or by in names):
+                    out.append(r)
+                    break
+        return out
+    return found(True) or found(False)
+
+
+def keep_songs(entries):
+    root = library_root()
+    with library_lock(root):
+        releases = read_library()
+        state = read_state(root, KEEP_FILE, {})
+        kept = state.get("releases") if isinstance(state.get("releases"), dict) else {}
+        summary = {"kept": [], "not_found": [], "ambiguous": []}
+        for entry in entries:
+            matches = keep_matches(entry, releases)
+            if len(matches) == 1:
+                r = matches[0]
+                kept[r["id"]] = {"artist": r.get("artist"), "album": r.get("album"),
+                                 "since": now().date().isoformat()}
+                summary["kept"].append(f'{r.get("artist")} - {r.get("album")}')
+            elif matches:
+                summary["ambiguous"].append({"song": entry, "matches": [
+                    f'{r.get("artist")} - {t.get("title")}' for r in matches for t in r["tracks"][:1]]})
+            else:
+                summary["not_found"].append(entry)
+        state["releases"] = kept
+        write_json(discovery_path(root, KEEP_FILE), state)
+    emit("summary", **{k: v for k, v in summary.items() if v})
+    return 0 if summary["kept"] and not summary["not_found"] and not summary["ambiguous"] else 65
 
 
 RELEASE_DIR = re.compile(r"--([0-9a-f]{32})$")
@@ -2557,6 +2631,8 @@ def main():
     mode.add_argument("--discover", action="store_true",
                       help="List songs to add: playlist queue, radio candidates, 1-star songs to remove; reads no stdin")
     mode.add_argument("--seeds", action="store_true", help='Merge taste seeds {"artists": [...], "songs": [...], "notes": ...}')
+    mode.add_argument("--keep", action="store_true",
+                      help='Mark library songs {"songs": [title, "Artist - Title" or link]} as checked: the audit skips them')
     mode.add_argument("--queue", action="store_true", help="Queue the songs of a playlist CSV (Exportify) for import")
     mode.add_argument("--retry", action="store_true",
                       help="Import the songs YouTube's bot check held back; reads no stdin")
@@ -2599,6 +2675,8 @@ def main():
             return make_mix(json.loads(raw))
         if args.seeds:
             return merge_seeds(validate_seeds(json.loads(raw)))
+        if args.keep:
+            return keep_songs(validate_keep(json.loads(raw)))
         if args.lookup:
             lookup(validate_lookup(json.loads(raw), resolve=True))
             return 0

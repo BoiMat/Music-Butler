@@ -33,6 +33,9 @@ Each release:
 `artist` is the album artist. A track may also have `artists` (everyone on it).
 `id` names the release in every command below.
 
+A release with `"keep": true` was checked by the user, who wants it as it is.
+Skip it: never report it, never change it.
+
 ## 2. Find problems
 
 Check every release for:
@@ -166,6 +169,7 @@ Keep it short, grouped by artist:
 - Fixed: what changed (old -> new).
 - Removed duplicates: what, and which copy stayed.
 - Needs the user: problems you did not fix, with your suggestion and link.
+  End this part with one line: `To stop seeing a song here, tell the bot: keep <title>`.
 If nothing needed fixing, say the library is tidy in one line.
 
 ## Never

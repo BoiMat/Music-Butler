@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole playlist (Spotify CSV or screenshots of its song list), make a playlist from songs already in the library, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, sends screenshots of a playlist, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), or asks for a music backup.
+description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole playlist (Spotify CSV or screenshots of its song list), make a playlist from songs already in the library, keep a song the weekly audit asked about as it is, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, sends screenshots of a playlist, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), or asks for a music backup.
 ---
 
 # Music Butler
@@ -195,6 +195,19 @@ The user may send 1, 2 or 3 screenshots of one playlist.
    `was not started`, tell the user that line. Otherwise reply in one line:
    it started, a report comes every 20 songs, the playlist appears in Tempo.
    Then stop.
+
+## Keep a song as it is
+
+The weekly audit may ask about a song already in the library. The user
+answers "keep <song>" or "it is fine as it is". Do NOT look it up or add it.
+
+1. Write `REPO/requests/keep-<id>.json` with the song's title, or
+   `Artist - Title`, or its link:
+   `{"songs": ["All I Do Is Win (The Musical)"]}`
+2. Run `REPO/scripts/butler.sh keep <id>`.
+3. `kept`: tell the user the audit will not ask about it again.
+   `ambiguous`: ask which one (show `matches`), then write it as `Artist - Title`.
+   `not_found`: ask the user for the exact title or the link.
 
 ## Playlist from the library
 
