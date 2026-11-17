@@ -151,6 +151,10 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   again on an imported playlist only refreshes that playlist.
   `inbox` picks up CSVs the user sent to the agent: Hermes saves Telegram files
   in its profile's `cache/documents`, which `PLAYLIST_INBOX` points to.
+  Screenshots of a song list skip `inbox`: the agent reads them (Hermes'
+  `vision` toolset), writes `requests/spotify-<id>.csv` with `Track Name` and
+  `Artist Name(s)` columns (artists joined by `;`) and runs `playlist <id>`.
+  Without a length, each song's title must match exactly.
   `queue` is the slow alternative: the daily bootstrap job adds 25 queued songs
   a day.
 - **Discovery**: `discover` reads the YouTube Music radio of songs you love and

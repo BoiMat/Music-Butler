@@ -40,7 +40,8 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
 - **Clean files**: ID3v2.4 / FLAC tags (including multi-artist), square cover
   art, time-synced `.lrc` lyrics. Each album appears in the library all at once.
 - **Whole playlists at once**: send a Spotify playlist (exported with
-  [Exportify](https://exportify.app)) to the bot. It imports every song in the
+  [Exportify](https://exportify.app)) to the bot, or just screenshots of its
+  song list (two or three for a long one). It imports every song in the
   background and reports every 20 songs. Each song is matched to YouTube Music
   by artist, title and length, and anything uncertain is listed instead of guessed.
   At the end the playlist appears in Tempo under its own name.
@@ -125,6 +126,10 @@ to send playlists to the bot as files, set in `.env`:
 PLAYLIST_NOTIFY=hermes -p music-butler send --to telegram --quiet   # any command reading stdin
 PLAYLIST_INBOX=/home/you/.hermes/profiles/music-butler/cache/documents  # where Hermes saves files
 ```
+
+To import screenshots of a song list instead, the agent reads them with
+Hermes' `vision` toolset and needs a model that can see images (e.g. gemma4):
+`hermes -p music-butler tools enable --platform telegram vision`, then `/new`.
 
 Then schedule the runs below. Details of the
 [discovery rules](docs/REFERENCE.md#taste-bootstrap-and-weekly-discovery).

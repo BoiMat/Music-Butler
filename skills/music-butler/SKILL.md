@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole Spotify playlist (CSV), make a playlist from songs already in the library, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), or asks for a music backup.
+description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole playlist (Spotify CSV or screenshots of its song list), make a playlist from songs already in the library, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, sends screenshots of a playlist, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), or asks for a music backup.
 ---
 
 # Music Butler
@@ -166,6 +166,35 @@ https://exportify.app and sends you the file.
 "How is the import going?": run `butler.sh playlist <name>` again; it prints
 the last report. Failed or "no certain match" songs can be added one by one
 the normal way.
+
+## Screenshots of a song list
+
+The user may send 1, 2 or 3 screenshots of one playlist.
+
+1. Call `vision_analyze` on screenshot 1, with this question:
+   `List every song: title | artists. Skip a song that is cut off.`
+   Write its songs in your reply. Then do the same for screenshot 2, and so
+   on. One screenshot at a time.
+2. Put all songs in one numbered list, in order. A song seen twice: keep it
+   once.
+3. Show the user the list. Ask: "More screenshots, or start?" Then STOP and
+   wait for the answer, even if the user said "add these". Do not write a
+   file yet. Do not run anything yet.
+4. More screenshots: do steps 1-3 again. The new list has ALL songs.
+5. The user says start: write the file `REPO/requests/spotify-<name>.csv`,
+   e.g. `REPO/requests/spotify-greatest-showman.csv`. The file name always
+   starts with `spotify-`. `<name>` is the playlist name, lowercase with
+   dashes. Line 1 is always `Track Name,Artist Name(s)`. Then one line per
+   song, artists joined by `;`. Example:
+   ```
+   Track Name,Artist Name(s)
+   "A Million Dreams","Ziv Zaifman;Hugh Jackman;Michelle Williams"
+   "Never Enough","Loren Allred"
+   ```
+6. Run `REPO/scripts/butler.sh playlist <name>`. If it says
+   `was not started`, tell the user that line. Otherwise reply in one line:
+   it started, a report comes every 20 songs, the playlist appears in Tempo.
+   Then stop.
 
 ## Playlist from the library
 
