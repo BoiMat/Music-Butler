@@ -134,6 +134,9 @@ an agent then adds songs from your playlists and songs you have not heard yet.
 ./scripts/butler.sh inbox            # copy new CSVs from PLAYLIST_INBOX into requests/
 ./scripts/butler.sh queue <id>       # or queue it for the daily bootstrap job, 25 songs a day
 ./scripts/butler.sh discover         # what to add next (JSON); downloads nothing
+./scripts/butler.sh edit <id>        # requests/edit-<id>.json: {"playlist": "...", "add": [songs],
+                                     #   "remove": [songs], "weekly": true|false}
+./scripts/butler.sh fit [id]         # weekly songs for playlists: list (no id), then add requests/fit-<id>.json
 ```
 
 - **Playlists**: `playlist` imports a Spotify playlist exported as CSV with
@@ -188,8 +191,26 @@ an agent then adds songs from your playlists and songs you have not heard yet.
   account. Navidrome re-evaluates a smart playlist only when its owner opens it,
   so `scheduled.sh` runs `butler.sh playlists` after every job: it waits for the
   scan and opens it as the admin.
+- **Changing playlists**: `edit` shows one of the listening account's playlists
+  (any of them, imported, made with `mix` or in Tempo; not the admin's smart
+  playlists) and adds or takes out songs, given as `Title`, `Artist - Title` or a
+  link, one at a time (Subsonic `updatePlaylist`). A title that names two
+  different songs is reported as `ambiguous`, not guessed. Changes are kept in
+  `<library>/discovery/playlist-edits.json`, so finishing or re-running the
+  import of that playlist keeps them: songs taken out stay out, songs added stay
+  at the end.
+- **Weekly songs for playlists**: `"weekly": true` in an `edit` file lets the
+  weekly job add new songs that fit that playlist; it is off for every playlist
+  until turned on, and `"weekly": false` turns it off again. `fit` (no id)
+  waits for the scan, then lists those playlists with their songs and the songs
+  Navidrome indexed since the last `fit <id>` (the first time: the last 7 days),
+  numbered. The agent writes `requests/fit-<id>.json` (`{"Workout": [3, 7]}`, or
+  `{}` when nothing fits) and `fit <id>` adds at most 3 songs per playlist;
+  playlists without weekly songs are refused. Each song is judged once: the next
+  list starts after this one.
 - State lives in `<library>/discovery/` (`seeds.json`, `queue.json`,
-  `history.json`) and is backed up with the library.
+  `history.json`, `playlist-edits.json`, `playlist-fit.json`) and is backed up
+  with the library.
 
 [`skills/music-discover/SKILL.md`](../skills/music-discover/SKILL.md) is the agent
 side: it runs `discover`, removes 1-star songs, chooses the songs (playlist queue,
@@ -198,7 +219,8 @@ them up and adds them with their origin. Run it on a schedule with
 [`scripts/scheduled.sh`](../README.md#scheduled-runs): a daily bootstrap job (25 songs a
 day, playlist queue first, silent once the library holds `BOOTSTRAP_TARGET`
 songs (150) and the queue is empty) and a weekly
-job (15 songs, at least 5 by new artists).
+job (15 songs, at least 5 by new artists, then up to 3 new songs for each
+playlist with weekly songs turned on).
 
 ## Local Ollama agent
 

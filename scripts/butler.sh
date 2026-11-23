@@ -27,6 +27,13 @@ Usage: scripts/butler.sh <command>
                    renumbers (JSON; "pages" says how many)
   mix <id>         make a player playlist from requests/mix-<id>.json:
                    {"name": "...", "songs": [numbers from songs]}
+  edit <id>        show or change one of the player's playlists from
+                   requests/edit-<id>.json: {"playlist": "...", "add": [songs],
+                   "remove": [songs], "weekly": true|false}; weekly = the weekly
+                   run may add new songs that fit it (off unless turned on)
+  fit [id]         no id: playlists with weekly on and the songs added since
+                   the last run, numbered; with id: add requests/fit-<id>.json
+                   {"Playlist": [numbers]} (at most 3 per playlist)
   remove <id>      move releases in requests/remove-<id>.json to the library trash
   discover         songs to add next: playlist queue, radio candidates, songs
                    rated 1 star to remove (JSON; downloads nothing)
@@ -46,7 +53,7 @@ EOF
 }
 
 # request_file <kind> <id> [ext]: requests/<kind>-<id>.<ext> (default json), kind is
-# approved, keep, lookup, mix, retag, remove, seeds or spotify.
+# approved, edit, fit, keep, lookup, mix, retag, remove, seeds or spotify.
 request_file() {
     local id="${2:-}" ext="${3:-json}"
     # Small models often pass the file name: requests/lookup-songs.json means id "songs".
@@ -146,6 +153,18 @@ case "${1:-}" in
     mix)
         file="$(request_file mix "${2:-}")"
         "${compose[@]}" run --rm -T downloader --mix < "$file"
+        ;;
+    edit)
+        file="$(request_file edit "${2:-}")"
+        "${compose[@]}" run --rm -T downloader --edit < "$file"
+        ;;
+    fit)
+        if [[ -z "${2:-}" ]]; then
+            "${compose[@]}" run --rm -T downloader --fit < /dev/null
+        else
+            file="$(request_file fit "$2")"
+            "${compose[@]}" run --rm -T downloader --fit-apply < "$file"
+        fi
         ;;
     lyrics)
         "${compose[@]}" run --rm -T downloader --lyrics < /dev/null

@@ -24,7 +24,8 @@ Usage: scripts/scheduled.sh <job>
   bootstrap   add up to 25 songs, playlist queue first, until the library holds
               BOOTSTRAP_TARGET songs and the queue is empty; then report once
               and stay silent                                    (daily)
-  weekly      remove songs rated 1 star, add 15 new songs, report (weekly)
+  weekly      remove songs rated 1 star, add 15 new songs, add new songs
+              to playlists with weekly songs on, report          (weekly)
 EOF
     exit 64
 }
@@ -73,7 +74,7 @@ case "$job" in
     weekly)
         skill=music-discover
         model="$(setting SCHEDULE_MODEL_WEEKLY "$(setting SCHEDULE_MODEL)")"
-        task="Weekly music discovery. Follow the music-discover skill (not music-butler) in weekly mode: remove songs rated 1 star, add 15 new songs, then write a short report for the owner." ;;
+        task="Weekly music discovery. Follow the music-discover skill (not music-butler) in weekly mode: remove songs rated 1 star, add 15 new songs, add new songs that fit to the user's playlists (step 5), then write a short report for the owner." ;;
     *) usage ;;
 esac
 

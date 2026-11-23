@@ -1441,6 +1441,119 @@ class MixFromLibrary(unittest.TestCase):
                 b.validate_mix(bad)
 
 
+class EditPlaylists(unittest.TestCase):
+    """`edit` changes one song at a time; `fit` lets the weekly run add new songs that fit."""
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.songs = [
+            {"id": "s1", "artist": "Survivor", "title": "Eye of the Tiger", "created": "2026-01-01T00:00:00.1Z"},
+            {"id": "s2", "artist": "Kanye West", "title": "Stronger", "created": "2026-01-01T00:00:00.1Z"},
+            {"id": "s3", "artist": "Loren Allred", "title": "Never Enough", "created": "2026-01-01T00:00:00.1Z"},
+            {"id": "s4", "artist": "Kelly Clarkson", "title": "Never Enough", "created": "2026-01-01T00:00:00.1Z"},
+            {"id": "s5", "artist": "Eminem", "title": "Till I Collapse", "created": "2026-11-20T10:00:00.123456789Z"},
+            {"id": "s6", "artist": "Adele", "title": "Hello", "created": "2026-11-21T10:00:00.5Z"}]
+        self.lists = {"w": ["s1"], "g": ["s3"]}
+        self.playlists = [{"id": "w", "name": "Workout", "owner": "tempo"},
+                          {"id": "g", "name": "Greatest Showman", "owner": "tempo"},
+                          {"id": "dw", "name": "Discover Weekly", "owner": "admin", "readonly": True}]
+        self.calls = []
+        for p in (patch.dict(os.environ, {"LIBRARY_ROOT": str(self.root), "NAVIDROME_LISTENER_USER": "tempo"}),
+                  patch.object(b, "navidrome_songs", side_effect=lambda: self.songs),
+                  patch.object(b, "read_library", return_value=[]),
+                  patch.object(b, "scan", return_value="scheduled"),
+                  patch.object(b, "now", return_value=b.datetime.datetime(2026, 11, 22, 12, tzinfo=b.datetime.timezone.utc)),
+                  patch.object(b, "subsonic", side_effect=self.fake_subsonic)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_subsonic(self, endpoint, params=None, account=None, **kwargs):
+        self.calls.append((endpoint, params))
+        by_id = {s["id"]: s for s in self.songs}
+        if endpoint == "getPlaylists":
+            return {"playlists": {"playlist": self.playlists}}
+        if endpoint == "getPlaylist":
+            return {"playlist": {"entry": [by_id[i] for i in self.lists[params["id"]]]}}
+        if endpoint == "updatePlaylist":
+            songs = self.lists[params["playlistId"]]
+            for i in sorted(params.get("songIndexToRemove", []), reverse=True):
+                del songs[i]
+            songs += params.get("songIdToAdd", [])
+        return {}
+
+    def run_cli(self, fn, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = fn(*args)
+        return code, json.loads(out.getvalue().splitlines()[-1])
+
+    def edit(self, **data):
+        return self.run_cli(b.edit_playlist, *b.validate_edit(data))
+
+    def test_show_add_and_remove_one_song_at_a_time(self):
+        code, out = self.edit(playlist="workout")
+        self.assertEqual((code, out["playlist"], out["songs"], out["weekly"]), (0, "Workout", ["Survivor - Eye of the Tiger"], False))
+        self.assertFalse((self.root / "discovery" / "playlist-edits.json").exists())  # showing changes nothing
+        code, out = self.edit(playlist="Workout", add=["Stronger", "Eye of the Tiger"], remove=[])
+        self.assertEqual((code, out["added"], out["already_in"]), (0, ["Kanye West - Stronger"], ["Survivor - Eye of the Tiger"]))
+        self.assertEqual(self.lists["w"], ["s1", "s2"])
+        code, out = self.edit(playlist="Workout", remove=["eye of the tiger", "Hello"])
+        self.assertEqual((code, out["removed"], out["not_in_playlist"]), (65, ["Survivor - Eye of the Tiger"], ["Hello"]))
+        self.assertEqual((self.lists["w"], out["songs"]), (["s2"], ["Kanye West - Stronger"]))
+        edits = json.loads((self.root / "discovery" / "playlist-edits.json").read_text())
+        self.assertEqual(edits["w"], {"name": "Workout", "added": ["s2"], "removed": ["s1"], "weekly": False})
+
+    def test_unclear_songs_and_playlists_are_asked_about(self):
+        code, out = self.edit(playlist="Workout", add=["Never Enough", "Nobody - Nothing"])
+        self.assertEqual((code, out["not_found"]), (65, ["Nobody - Nothing"]))
+        self.assertEqual(out["ambiguous"][0]["matches"], ["Loren Allred - Never Enough", "Kelly Clarkson - Never Enough"])
+        self.assertEqual(self.lists["w"], ["s1"])
+        code, out = self.edit(playlist="Discover Weekly")  # the admin's smart playlist is not the user's to edit
+        self.assertEqual((code, out["reason"], out["playlists"]), (66, "playlist_not_found", ["Workout", "Greatest Showman"]))
+
+    def test_weekly_songs_only_go_to_playlists_turned_on(self):
+        code, out = self.run_cli(b.fit_list)
+        self.assertEqual((code, out["playlists"]), (0, []))  # off by default
+        self.edit(playlist="Workout", weekly=True)
+        code, out = self.run_cli(b.fit_list)
+        self.assertEqual([p["name"] for p in out["playlists"]], ["Workout"])
+        self.assertEqual(out["new_songs"], ["1. Eminem - Till I Collapse", "2. Adele - Hello"])  # the last 7 days
+        code, out = self.run_cli(b.fit_apply, b.validate_fit({"Workout": [1], "Greatest Showman": [2]}))
+        self.assertEqual((out["added"], out["not_open_to_weekly_songs"]), ({"Workout": ["Eminem - Till I Collapse"]}, ["Greatest Showman"]))
+        self.assertEqual((self.lists["w"], self.lists["g"]), (["s1", "s5"], ["s3"]))
+        # The next run starts after these songs; applying twice needs a new list.
+        self.assertEqual(self.run_cli(b.fit_apply, {})[1]["reason"], "run_fit_first")
+        self.assertEqual(self.run_cli(b.fit_list)[1]["new_songs"], [])
+        self.edit(playlist="Workout", weekly=False)
+        self.assertEqual(self.run_cli(b.fit_list)[1]["playlists"], [])
+
+    def test_at_most_three_weekly_songs_per_playlist(self):
+        self.songs += [{"id": f"n{i}", "artist": "New", "title": f"Song {i}", "created": "2026-11-21T00:00:00Z"} for i in range(5)]
+        self.edit(playlist="Workout", weekly=True)
+        self.run_cli(b.fit_list)
+        code, out = self.run_cli(b.fit_apply, {"Workout": [3, 4, 5, 6, 99]})
+        self.assertEqual((len(out["added"]["Workout"]), out["only_first_3_added"], out["unknown_numbers"]), (3, ["Workout"], [99]))
+        self.assertEqual(len(self.lists["w"]), 4)
+
+    def test_fit_file_is_validated(self):
+        for bad in ([], {"W": [1.5]}, {"W": "1"}, {"W": [True]}):
+            with self.subTest(bad=bad), self.assertRaises(b.Failure):
+                b.validate_fit(bad)
+        for bad in ({}, {"add": ["x"]}, {"playlist": "W", "add": "x"}, {"playlist": "W", "weekly": "yes"},
+                    {"playlist": "W", "extra": 1}):
+            with self.subTest(bad=bad), self.assertRaises(b.Failure):
+                b.validate_edit(bad)
+
+    def test_a_playlist_import_keeps_the_edits(self):
+        self.edit(playlist="Workout", add=["Till I Collapse"], remove=["Eye of the Tiger"])
+        releases = [{"id": "a" * 32, "artist": "Survivor", "album": "A", "tracks": [{"n": 1, "title": "Eye of the Tiger"}]},
+                    {"id": "b" * 32, "artist": "Kanye West", "album": "B", "tracks": [{"n": 1, "title": "Stronger"}]}]
+        self.songs[0]["album"], self.songs[1]["album"] = "A", "B"
+        csv = b"Track Name,Artist Name(s)\nEye of the Tiger,Survivor\nStronger,Kanye West\n"
+        with patch.object(b, "read_library", return_value=releases), contextlib.redirect_stdout(io.StringIO()):
+            b.sync_playlist("workout", "Workout", csv)
+        self.assertIn(("createPlaylist", {"playlistId": "w", "songId": ["s2", "s5"]}), self.calls)
+
+
 class Uploads(unittest.TestCase):
     """Audio files the user sent (e.g. to the bot on Telegram) instead of a link."""
     def setUp(self):

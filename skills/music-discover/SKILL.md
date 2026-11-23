@@ -1,6 +1,6 @@
 ---
 name: music-discover
-description: Grow the user's self-hosted Navidrome music library (Music Butler Stack) on a schedule. Import songs queued from their playlists, discover new songs they may like from their taste seeds and listening, and remove songs they rated 1 star. Use for a scheduled or requested "bootstrap" or "weekly discovery" run, not for songs the user names.
+description: Grow the user's self-hosted Navidrome music library (Music Butler Stack) on a schedule. Import songs queued from their playlists, discover new songs they may like from their taste seeds and listening, remove songs they rated 1 star, and add new songs to the playlists the user opened for that. Use for a scheduled or requested "bootstrap" or "weekly discovery" run, not for songs the user names.
 ---
 
 # Music Discover
@@ -106,13 +106,28 @@ This is the music-butler flow. Its rules apply here too.
    `busy_retry_later`, wait a minute and run the same `add` again. Never add a
    song listed under `added` again.
 
-## 5. Report
+## 5. Weekly mode only: grow the user's playlists
+
+1. Run `REPO/scripts/butler.sh fit`. It may wait a few minutes.
+   `playlists` empty: skip to step 6.
+2. Each playlist has its `songs`. `new_songs` are numbered:
+   `3. Eminem - Till I Collapse (2002, Hip-Hop)`.
+3. For each playlist, choose new songs that clearly fit it: same mood, use and
+   style as its songs. At most 3 per playlist. Choosing none is normal.
+   When unsure, leave the song out.
+4. Write `REPO/requests/fit-<id>.json` with the numbers:
+   `{"Workout": [3, 7]}`. Nothing fits: `{}`.
+5. Run `REPO/scripts/butler.sh fit <id>` once, also with `{}`.
+   `added` says what went where.
+
+## 6. Report
 
 Keep it short. It is sent to the user's phone:
 - Added: `Artist - Title`, and for discoveries `(because you like <because[0]>)`.
   Group by origin: from your playlists / from your artists / new discoveries.
 - Removed: songs rated 1 star, moved to the trash.
 - Failed songs in one line, with their `reason`.
+- Playlists: `Added to Workout: Artist - Title`. Nothing added: leave this out.
 - Deferred: "N songs are waiting: YouTube blocked downloads for now; they are
   retried on their own and you get a message."
 - Bootstrap: how many songs the library has now (`library_songs` + added).
