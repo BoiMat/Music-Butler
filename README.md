@@ -49,6 +49,10 @@ you: "add Get Lucky by Daft Punk and Mr. Brightside"
   agent reads the library in numbered pages (`MIX_PAGE_SIZE`, default 100),
   picks the songs that fit and the playlist appears in Tempo. Nothing is
   downloaded, and a playlist it did not make is never replaced.
+- **Changing playlists**: "add Eye of the Tiger to Workout", "take Hello out".
+  Say "let the weekly run add to Workout" and each week it adds up to 3 new
+  songs that clearly fit (often none). It is off for every playlist until you
+  turn it on. Re-importing a playlist keeps your changes.
 - **Taste**: a few artists and a few words ("Italian pop, no trap") steer
   discovery until your own likes and ratings take over.
 - **Weekly discovery**: new songs from the YouTube Music radios of songs you

@@ -1,6 +1,6 @@
 ---
 name: music-butler
-description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole playlist (Spotify CSV or screenshots of its song list), make a playlist from songs already in the library, keep a song the weekly audit asked about as it is, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, sends screenshots of a playlist, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), or asks for a music backup.
+description: Add one or more songs or albums (by name, link or sent audio file) to the user's self-hosted Navidrome music library (Music Butler Stack), report the result, check library status, record the user's music taste, import a whole playlist (Spotify CSV or screenshots of its song list), make a playlist from songs already in the library, add or remove songs in a playlist, let the weekly run add new songs to a playlist (or stop it), keep a song the weekly audit asked about as it is, or make an encrypted backup to a USB drive. Use when the user asks to download, import or add music to their library, asks what is in it, says what music they like or dislike, sends screenshots of a playlist, wants a playlist imported or made from their own songs (e.g. make me a chill playlist), wants a playlist changed or left alone, or asks for a music backup.
 ---
 
 # Music Butler
@@ -219,8 +219,35 @@ For "make me a playlist of ..." from songs the user has. Download nothing.
 3. Write `REPO/requests/mix-<id>.json`: `{"name": "Rainy Day", "songs": [12, 40, 7]}`
 4. Run `REPO/scripts/butler.sh mix <id>`. Reply: name, song count, it is in Tempo.
 
-Changing a playlist: write ALL its songs again under the same name.
 `playlist_name_taken_choose_another`: use another name.
+
+## Change a playlist
+
+For "add <song> to <playlist>", "take <song> out of <playlist>",
+"what is in <playlist>". Works on every playlist of the user. Download nothing.
+
+1. Write `REPO/requests/edit-<id>.json`. Songs are `Title` or `Artist - Title`:
+   `{"playlist": "Workout", "add": ["Survivor - Eye of the Tiger"], "remove": ["Hello"]}`
+   Only to see the songs: `{"playlist": "Workout"}`
+2. Run `REPO/scripts/butler.sh edit <id>`.
+3. Reply with `added` and `removed`. `songs` is the whole playlist now.
+   `ambiguous`: ask which one (show `matches`), then write it as `Artist - Title`.
+   `not_found`: the song is not in the library. Ask if you should add it first.
+   `not_in_playlist`: tell the user it was not in the playlist.
+   `playlist_not_found`: show `playlists` and ask which one.
+
+## Weekly songs for a playlist
+
+The weekly run can add new songs that fit a playlist. It is off for every
+playlist until the user turns it on.
+
+- "let the weekly run add to Workout", "keep Workout growing":
+  write `{"playlist": "Workout", "weekly": true}` and run `edit <id>`.
+- "don't touch Workout", "never change Workout", "stop adding to Workout":
+  write `{"playlist": "Workout", "weekly": false}` and run `edit <id>`.
+
+Always write the file and run `edit`. Only saying "noted" changes nothing.
+Reply with `weekly` from the output: true = on, false = off.
 
 ## Other commands
 

@@ -1231,23 +1231,25 @@ def keep_matches(entry, releases):
     vid = video_id(entry)
     if vid:
         return [r for r in releases if any(video_id(t.get("url")) == vid for t in r["tracks"])]
+    items = [(i, t.get("title"), " ".join([t.get("artist") or "", r.get("artist") or ""] + (t.get("artists") or [])))
+             for i, r in enumerate(releases) for t in r["tracks"]]
+    return [releases[i] for i in match_title(entry, items)]
+
+
+def match_title(entry, items):
+    """Keys of the items (key, title, artist names) that are the song `entry`, "Title" or
+    "Artist - Title": the same title, versions aside (else a title containing it), by
+    that artist when one is given. Each key once, in item order."""
     artist, _, title = entry.rpartition(" - ") if " - " in entry else ("", "", entry)
     want, by = norm(base_title(title)), norm(main_artist(artist))
     if not want:
         return []
-
-    def found(exact):
-        out = []
-        for r in releases:
-            for t in r["tracks"]:
-                have = norm(base_title(t.get("title")))
-                hit = have == want if exact else want in norm(t.get("title"))
-                names = norm(" ".join([t.get("artist") or "", r.get("artist") or ""] + (t.get("artists") or [])))
-                if hit and (not by or by in names):
-                    out.append(r)
-                    break
-        return out
-    return found(True) or found(False)
+    for exact in (True, False):
+        out = [key for key, have, names in items
+               if (norm(base_title(have)) == want if exact else want in norm(have)) and (not by or by in norm(names))]
+        if out:
+            return list(dict.fromkeys(out))
+    return []
 
 
 def keep_songs(entries):
@@ -1689,15 +1691,9 @@ def refresh_playlists():
     if scan() != "requested":
         emit("summary", ok=False, reason="admin_account_not_configured", refreshed=[])
         return 0
-    deadline = time.time() + SCAN_WAIT
-    while True:
-        time.sleep(5)
-        status = (subsonic("getScanStatus") or {}).get("scanStatus") or {}
-        if not status.get("scanning"):
-            break
-        if time.time() > deadline:
-            emit("summary", ok=False, reason="scan_still_running", refreshed=[])
-            return 69
+    if not scan_finished():
+        emit("summary", ok=False, reason="scan_still_running", refreshed=[])
+        return 69
     names = {p["name"] for p in PLAYLISTS.values()}
     refreshed = []
     for playlist in (subsonic("getPlaylists") or {}).get("playlists", {}).get("playlist", []):
@@ -1706,6 +1702,18 @@ def refresh_playlists():
             refreshed.append({"name": playlist["name"], "songs": len(full.get("entry") or [])})
     emit("summary", ok=len(refreshed) == len(names), refreshed=refreshed)
     return 0
+
+
+def scan_finished():
+    """Wait (up to SCAN_WAIT) for the scan just started: False when it is still running."""
+    deadline = time.time() + SCAN_WAIT
+    while True:
+        time.sleep(5)
+        status = (subsonic("getScanStatus") or {}).get("scanStatus") or {}
+        if not status.get("scanning"):
+            return True
+        if time.time() > deadline:
+            return False
 
 
 def main_artist(value):
@@ -2077,6 +2085,13 @@ def sync_playlist(playlist, name, raw):
     owner = os.environ.get(account + "_USER")
     mine = [p for p in (subsonic("getPlaylists", account=account) or {}).get("playlists", {}).get("playlist", [])
             if p.get("name") == name and p.get("owner") == owner]
+    if mine:  # songs the user (or the weekly run) added or took out stay that way
+        edit = read_state(root, EDITS_FILE, {}).get(mine[0]["id"])
+        if isinstance(edit, dict):
+            gone = set(edit.get("removed") or [])
+            known = {s.get("id") for s in songs}
+            order = [i for i in order if i not in gone]
+            order += [i for i in dict.fromkeys(edit.get("added") or []) if i in known and i not in order]
     if order:
         params = {"playlistId": mine[0]["id"]} if mine else {"name": name}
         subsonic("createPlaylist", {**params, "songId": order}, account=account)
@@ -2185,6 +2200,238 @@ def make_mix(data):
         write_json(discovery_path(root, "mixes.json"), made)
     emit("summary", ok=True, playlist=name, songs=len(order), updated=bool(same),
          **({"unknown_numbers": unknown[:20]} if unknown else {}))
+    return 0
+
+
+EDITS_FILE = "playlist-edits.json"  # {playlist id: {"name", "added", "removed", "weekly"}}
+FIT_FILE = "playlist-fit.json"  # {"since"; while choosing: "taken", "songs"}
+FIT_MAX = 3  # songs the weekly run may add to one playlist
+FIT_FIRST_DAYS = 7  # the first weekly run looks at songs added this many days back
+FIT_NEW_MAX = 100
+EDIT_MAX = 50
+SHOW_MAX = 300  # songs of a playlist printed
+
+
+def label(song):
+    return f"{clip(song.get('artist'), 80) or '?'} - {clip(song.get('title'), 120) or '?'}"
+
+
+def my_playlists():
+    """The listener's own playlists (not the smart ones, which belong to the admin)."""
+    account = listener_account()
+    owner = os.environ.get(account + "_USER")
+    return [p for p in (subsonic("getPlaylists", account=account) or {}).get("playlists", {}).get("playlist", [])
+            if isinstance(p, dict) and p.get("owner") == owner and isinstance(p.get("id"), str)
+            and not p.get("readonly")]
+
+
+def playlist_entries(playlist_id):
+    full = (subsonic("getPlaylist", {"id": playlist_id}, limit=16 * MAX_RESPONSE, account=listener_account())
+            or {}).get("playlist") or {}
+    return [e for e in full.get("entry") or [] if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def change_playlist(playlist_id, add=(), remove_at=()):
+    account = listener_account()
+    if remove_at:
+        subsonic("updatePlaylist", {"playlistId": playlist_id, "songIndexToRemove": sorted(remove_at)}, account=account)
+    if add:
+        subsonic("updatePlaylist", {"playlistId": playlist_id, "songIdToAdd": list(add)}, account=account)
+
+
+def record_edit(root, playlist, added=(), removed=(), weekly=None):
+    """Remember changes, so a playlist import that rebuilds the playlist keeps them."""
+    edits = read_state(root, EDITS_FILE, {})
+    old = edits.get(playlist["id"]) if isinstance(edits.get(playlist["id"]), dict) else {}
+    record = {"name": playlist.get("name"),
+              "added": [i for i in old.get("added") or [] if i not in removed] + list(added),
+              "removed": [i for i in old.get("removed") or [] if i not in added] + list(removed),
+              "weekly": old.get("weekly") is True if weekly is None else weekly}
+    edits[playlist["id"]] = record
+    write_json(discovery_path(root, EDITS_FILE), edits)
+    return record
+
+
+def song_ids_for(entry, songs, releases):
+    """Navidrome ids of the songs `entry` names (title, "Artist - Title" or link)."""
+    vid = video_id(entry)
+    if vid:
+        where = {(r["id"], t["n"]) for r in releases for t in r["tracks"] if video_id(t.get("url")) == vid}
+        return list(dict.fromkeys(s["id"] for w, s in match_songs(releases, songs) if w in where))
+    ids = match_title(entry, [(s["id"], s.get("title"), " ".join(
+        [s.get("artist") or "", s.get("displayArtist") or "", s.get("albumArtist") or ""])) for s in songs])
+    by_id = {s["id"]: s for s in songs}
+    # The same song twice in the library (single and album) is not a choice to ask about.
+    return ids[:1] if len({norm(label(by_id[i])) for i in ids}) == 1 else ids
+
+
+def validate_edit(data):
+    """{"playlist": name, "add": [songs], "remove": [songs], "weekly": true/false}; only the
+    name is needed (that shows the playlist)."""
+    if not isinstance(data, dict) or "playlist" not in data or set(data) - {"playlist", "add", "remove", "weekly"}:
+        raise Failure("edit_needs_playlist", 65)
+    name = text(data["playlist"], "playlist_name", limit=100)
+    lists = []
+    for key in ("add", "remove"):
+        value = data.get(key, [])
+        if not isinstance(value, list) or len(value) > EDIT_MAX:
+            raise Failure(key + "_must_be_a_list_of_songs", 65)
+        lists.append([text(s, "song") for s in value])
+    weekly = data.get("weekly")
+    if weekly is not None and not isinstance(weekly, bool):
+        raise Failure("weekly_must_be_true_or_false", 65)
+    return name, lists[0], lists[1], weekly
+
+
+def edit_playlist(name, add, remove, weekly):
+    """Show the listener's playlist `name`, add or take out songs, and allow (or stop) the
+    weekly run adding new songs that fit it."""
+    root = library_root()
+    mine = my_playlists()
+    same = [p for p in mine if norm(p.get("name")) == norm(name)]
+    if not same:
+        emit("error", code=66, reason="playlist_not_found", playlists=[p.get("name") for p in mine])
+        return 66
+    playlist = same[0]
+    entries = playlist_entries(playlist["id"])
+    order = [e["id"] for e in entries]
+    out = {"added": [], "removed": [], "already_in": [], "not_found": [], "not_in_playlist": [], "ambiguous": []}
+    added = []
+    if add:
+        songs = navidrome_songs()
+        if songs is None:
+            emit("error", code=69, reason="navidrome_unavailable")
+            return 69
+        songs = [s for s in songs if isinstance(s.get("id"), str)]
+        by_id = {s["id"]: s for s in songs}
+        releases = read_library() if any(video_id(s) for s in add) else []
+        for entry in add:
+            ids = song_ids_for(entry, songs, releases)
+            if len(ids) > 1:
+                out["ambiguous"].append({"song": entry, "matches": [label(by_id[i]) for i in ids[:5]]})
+            elif not ids:
+                out["not_found"].append(entry)
+            elif ids[0] in order or ids[0] in added:
+                out["already_in"].append(label(by_id[ids[0]]))
+            else:
+                added.append(ids[0])
+                out["added"].append(label(by_id[ids[0]]))
+    removed = []
+    items = [(e["id"], e.get("title"), " ".join([e.get("artist") or "", e.get("displayArtist") or ""]))
+             for e in entries]
+    by_entry = {e["id"]: e for e in entries}
+    for entry in remove:
+        ids = match_title(entry, items)
+        if len({norm(label(by_entry[i])) for i in ids}) > 1:
+            out["ambiguous"].append({"song": entry, "matches": [label(by_entry[i]) for i in ids[:5]]})
+        elif not ids:
+            out["not_in_playlist"].append(entry)
+        elif ids[0] not in removed:
+            removed += ids
+            out["removed"].append(label(by_entry[ids[0]]))
+    change_playlist(playlist["id"], add=added, remove_at=[i for i, e in enumerate(entries) if e["id"] in removed])
+    if added or removed or weekly is not None:
+        record = record_edit(root, playlist, added, removed, weekly)
+    else:
+        record = read_state(root, EDITS_FILE, {}).get(playlist["id"])
+        record = {"weekly": isinstance(record, dict) and record.get("weekly") is True}
+    final = [by_entry[i] for i in order if i not in removed]
+    shown = [label(e) for e in final] + out["added"]
+    emit("summary", ok=not (out["not_found"] or out["not_in_playlist"] or out["ambiguous"]),
+         playlist=playlist.get("name"), weekly=record["weekly"], songs_total=len(shown),
+         songs=shown[:SHOW_MAX], **{k: v for k, v in out.items() if v})
+    return 0 if not (out["not_found"] or out["not_in_playlist"] or out["ambiguous"]) else 65
+
+
+def created(song):
+    """"2026-11-22T10:09:33" (UTC) from Navidrome's "2026-11-22T10:09:33.051279052Z"."""
+    value = song.get("created")
+    return value[:19] if isinstance(value, str) and re.match(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", value) else ""
+
+
+def fit_list():
+    """The playlists the weekly run may add to, and the songs added since its last run,
+    numbered; nothing changes until `fit_apply`."""
+    root = library_root()
+    edits = read_state(root, EDITS_FILE, {})
+    open_ids = {i for i, e in edits.items() if isinstance(e, dict) and e.get("weekly") is True}
+    playlists = [p for p in my_playlists() if p["id"] in open_ids]
+    if not playlists:
+        emit("fit", playlists=[], new_songs=[], next="no playlist takes weekly songs: skip this step")
+        return 0
+    if scan() == "requested":  # this run's new songs must be in Navidrome first
+        scan_finished()
+    songs = navidrome_songs()
+    if songs is None:
+        emit("error", code=69, reason="navidrome_unavailable")
+        return 69
+    state = read_state(root, FIT_FILE, {})
+    stamp = "%Y-%m-%dT%H:%M:%S"
+    since = state.get("since") if isinstance(state.get("since"), str) else \
+        (now() - datetime.timedelta(days=FIT_FIRST_DAYS)).strftime(stamp)
+    taken = now().strftime(stamp)
+    new = sorted((s for s in songs if isinstance(s.get("id"), str) and since < created(s) <= taken),
+                 key=lambda s: (created(s), s["id"]))[-FIT_NEW_MAX:]
+    snapshot = [{"id": s["id"], "line": song_line(i, s)} for i, s in enumerate(new, 1)]
+    write_json(discovery_path(root, FIT_FILE), {"since": since, "taken": taken, "songs": snapshot})
+    shown = []
+    for p in playlists:
+        entries = playlist_entries(p["id"])
+        shown.append({"name": p.get("name"), "songs_total": len(entries),
+                      "songs": [label(e) for e in entries][:SHOW_MAX]})
+    emit("fit", playlists=shown, new_songs=[s["line"] for s in snapshot],
+         next="write the fit file (it can be {}), then run fit <id>")
+    return 0
+
+
+def validate_fit(data):
+    """{"Playlist name": [numbers from new_songs], ...}; {} = nothing fits."""
+    if not isinstance(data, dict) or len(data) > 50:
+        raise Failure("fit_needs_playlist_names_and_numbers", 65)
+    out = {}
+    for name, numbers in data.items():
+        text(name, "playlist_name", limit=100)
+        if not isinstance(numbers, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in numbers):
+            raise Failure("song_numbers_must_be_numbers", 65)
+        out[name] = list(dict.fromkeys(numbers))
+    return out
+
+
+def fit_apply(choice):
+    """Add the chosen new songs (at most FIT_MAX each) to playlists open to weekly songs;
+    the next `fit_list` starts after this one's songs."""
+    root = library_root()
+    state = read_state(root, FIT_FILE, {})
+    snapshot = state.get("songs")
+    if not isinstance(state.get("taken"), str) or not isinstance(snapshot, list):
+        emit("error", code=64, reason="run_fit_first")
+        return 64
+    edits = read_state(root, EDITS_FILE, {})
+    playlists = {norm(p.get("name")): p for p in my_playlists()
+                 if isinstance(edits.get(p["id"]), dict) and edits[p["id"]].get("weekly") is True}
+    added, refused, limited, unknown = {}, [], [], []
+    for name, numbers in choice.items():
+        playlist = playlists.get(norm(name))
+        if playlist is None:
+            refused.append(name)
+            continue
+        if len(numbers) > FIT_MAX:
+            limited.append(name)
+        unknown += [n for n in numbers if not 1 <= n <= len(snapshot)]
+        chosen = [snapshot[n - 1] for n in numbers if 1 <= n <= len(snapshot)][:FIT_MAX]
+        have = {e["id"] for e in playlist_entries(playlist["id"])}
+        chosen = [s for s in chosen if s["id"] not in have]
+        if chosen:
+            change_playlist(playlist["id"], add=[s["id"] for s in chosen])
+            record_edit(root, playlist, added=[s["id"] for s in chosen])
+            added[playlist.get("name")] = [re.sub(r"^\d+\. ", "", s["line"]) for s in chosen]
+    write_json(discovery_path(root, FIT_FILE), {"since": state["taken"]})
+    extra = {"not_open_to_weekly_songs": refused} if refused else {}
+    if limited:
+        extra["only_first_3_added"] = limited
+    if unknown:
+        extra["unknown_numbers"] = unknown[:20]
+    emit("summary", ok=not refused and not unknown, added=added, **extra)
     return 0
 
 
@@ -2624,6 +2871,13 @@ def main():
                       help="Print one page of the library's songs, numbered, to choose a playlist from; reads no stdin")
     mode.add_argument("--mix", action="store_true",
                       help='Make the listener\'s playlist from {"name": ..., "songs": [numbers from --songs]}')
+    mode.add_argument("--edit", action="store_true",
+                      help='Show/change the listener\'s playlist {"playlist": name, "add": [...], "remove": [...], '
+                           '"weekly": true|false}')
+    mode.add_argument("--fit", action="store_true",
+                      help="List playlists open to weekly songs and the songs added since the last run; reads no stdin")
+    mode.add_argument("--fit-apply", action="store_true",
+                      help='Add chosen new songs {"Playlist": [numbers from --fit]} (at most 3 each)')
     mode.add_argument("--playlists", action="store_true",
                       help="Wait for the scan, then refresh the smart playlists as their owner; reads no stdin")
     mode.add_argument("--lyrics", action="store_true",
@@ -2650,6 +2904,8 @@ def main():
             return refresh_playlists()
         if args.retry:
             return retry()
+        if args.fit:
+            return fit_list()
         if args.songs is not None:
             return mix_songs(args.songs)
         limit = (MAX_PLAYLIST if args.queue or args.playlist_check or args.playlist is not None
@@ -2673,6 +2929,10 @@ def main():
             return sync_playlist(args.playlist_sync, name, raw)
         if args.mix:
             return make_mix(json.loads(raw))
+        if args.edit:
+            return edit_playlist(*validate_edit(json.loads(raw)))
+        if args.fit_apply:
+            return fit_apply(validate_fit(json.loads(raw)))
         if args.seeds:
             return merge_seeds(validate_seeds(json.loads(raw)))
         if args.keep:
